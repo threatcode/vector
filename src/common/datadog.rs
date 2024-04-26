@@ -4,44 +4,77 @@
 #![allow(dead_code)]
 #![allow(unreachable_pub)]
 use serde::{Deserialize, Serialize};
-use vector_lib::{event::DatadogMetricOriginMetadata, sensitive_string::SensitiveString};
+use vector_lib::{
+    event::DatadogMetricOriginMetadata, schema::meaning, sensitive_string::SensitiveString,
+};
 
 pub(crate) const DD_US_SITE: &str = "datadoghq.com";
 pub(crate) const DD_EU_SITE: &str = "datadoghq.eu";
 
+/// The datadog tags event path.
+pub const DDTAGS: &str = "ddtags";
+
+/// Mapping of the semantic meaning of well known Datadog reserved attributes
+/// to the field name that Datadog intake expects.
+// https://docs.datadoghq.com/logs/log_configuration/attributes_naming_convention/?s=severity#reserved-attributes
+pub const DD_RESERVED_SEMANTIC_ATTRS: [(&str, &str); 6] = [
+    (meaning::SEVERITY, "status"), // status is intentionally semantically defined as severity
+    (meaning::TIMESTAMP, "timestamp"),
+    (meaning::HOST, "hostname"),
+    (meaning::SERVICE, "service"),
+    (meaning::SOURCE, "ddsource"),
+    (meaning::TAGS, DDTAGS),
+];
+
+/// DatadogSeriesMetric
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub(crate) struct DatadogSeriesMetric {
-    pub(crate) metric: String,
-    pub(crate) r#type: DatadogMetricType,
-    pub(crate) interval: Option<u32>,
-    pub(crate) points: Vec<DatadogPoint<f64>>,
-    pub(crate) tags: Option<Vec<String>>,
+pub struct DatadogSeriesMetric {
+    /// metric
+    pub metric: String,
+    /// metric type
+    pub r#type: DatadogMetricType,
+    /// interval
+    pub interval: Option<u32>,
+    /// points
+    pub points: Vec<DatadogPoint<f64>>,
+    /// tags
+    pub tags: Option<Vec<String>>,
+    /// host
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) host: Option<String>,
+    pub host: Option<String>,
+    /// source_type_name
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) source_type_name: Option<String>,
+    pub source_type_name: Option<String>,
+    /// device
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) device: Option<String>,
+    pub device: Option<String>,
+    /// metadata
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) metadata: Option<DatadogSeriesMetricMetadata>,
+    pub metadata: Option<DatadogSeriesMetricMetadata>,
 }
 
+/// Datadog series metric metadata
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub(crate) struct DatadogSeriesMetricMetadata {
+pub struct DatadogSeriesMetricMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) origin: Option<DatadogMetricOriginMetadata>,
 }
 
+/// Datadog Metric Type
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum DatadogMetricType {
+pub enum DatadogMetricType {
+    /// Gauge
     Gauge,
+    /// Count
     Count,
+    /// Rate
     Rate,
 }
 
+/// Datadog Point
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub(crate) struct DatadogPoint<T>(pub(crate) i64, pub(crate) T);
+pub struct DatadogPoint<T>(pub i64, pub T);
 
 /// Gets the base API endpoint to use for any calls to Datadog.
 ///
