@@ -14,7 +14,7 @@ env:
 jobs:
   publish-new-environment:
     runs-on: ubuntu-20.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: (PR comment) Get PR branch
         if: ${{ github.event_name == 'issue_comment' }}
@@ -64,7 +64,7 @@ jobs:
             org.opencontainers.image.title=Vector development environment
             org.opencontainers.image.url=https://github.com/vectordotdev/vector
       - name: Build and push
-        uses: docker/build-push-action@v5.3.0
+        uses: docker/build-push-action@v5.4.0
         with:
           context: .
           file: ./scripts/environment/Dockerfile
