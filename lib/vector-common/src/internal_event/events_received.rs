@@ -1,13 +1,15 @@
-use metrics::{register_counter, register_histogram, Counter, Histogram};
+use metrics::{Counter, Histogram};
+
+use crate::{counter, histogram};
 use tracing::trace;
 
-use super::CountByteSize;
+use super::{CountByteSize, CounterName, HistogramName};
 
 crate::registered_event!(
     EventsReceived => {
-        events_count: Histogram = register_histogram!("component_received_events_count"),
-        events: Counter = register_counter!("component_received_events_total"),
-        event_bytes: Counter = register_counter!("component_received_event_bytes_total"),
+        events_count: Histogram = histogram!(HistogramName::ComponentReceivedEventsCount),
+        events: Counter = counter!(CounterName::ComponentReceivedEventsTotal),
+        event_bytes: Counter = counter!(CounterName::ComponentReceivedEventBytesTotal),
     }
 
     fn emit(&self, data: CountByteSize) {

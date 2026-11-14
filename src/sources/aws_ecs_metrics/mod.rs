@@ -1,15 +1,22 @@
 use std::{env, time::Duration};
+use vector_lib::internal_event::{emit, register};
 
 use futures::StreamExt;
-use hyper::{Body, Request};
+use http::{Request, StatusCode};
+use http_body_util::{BodyExt as _, Collected};
 use serde_with::serde_as;
 use tokio::time;
 use tokio_stream::wrappers::IntervalStream;
-use vector_lib::configurable::configurable_component;
-use vector_lib::internal_event::{ByteSize, BytesReceived, InternalEventHandle as _, Protocol};
-use vector_lib::{config::LogNamespace, EstimatedJsonEncodedSizeOf};
+use vector_http::empty_body;
+use vector_lib::{
+    EstimatedJsonEncodedSizeOf,
+    config::LogNamespace,
+    configurable::configurable_component,
+    internal_event::{ByteSize, BytesReceived, InternalEventHandle as _, Protocol},
+};
 
 use crate::{
+    SourceSender,
     config::{GenerateConfig, SourceConfig, SourceContext, SourceOutput},
     http::HttpClient,
     internal_events::{
@@ -17,7 +24,7 @@ use crate::{
         HttpClientHttpResponseError, StreamClosedError,
     },
     shutdown::ShutdownSignal,
-    SourceSender,
+    tls::MaybeTlsSettings,
 };
 
 mod parser;
@@ -98,15 +105,17 @@ pub struct AwsEcsMetricsSourceConfig {
     namespace: String,
 }
 
-const METADATA_URI_V4: &str = "ECS_CONTAINER_METADATA_URI";
-const METADATA_URI_V3: &str = "ECS_CONTAINER_METADATA_URI_V4";
+const METADATA_URI_V4: &str = "ECS_CONTAINER_METADATA_URI_V4";
+const METADATA_URI_V3: &str = "ECS_CONTAINER_METADATA_URI";
 
+#[must_use]
 pub fn default_endpoint() -> String {
     env::var(METADATA_URI_V4)
         .or_else(|_| env::var(METADATA_URI_V3))
         .unwrap_or_else(|_| "http://169.254.170.2/v2".into())
 }
 
+#[must_use]
 pub fn default_version() -> Version {
     if env::var(METADATA_URI_V4).is_ok() {
         Version::V4
@@ -117,10 +126,12 @@ pub fn default_version() -> Version {
     }
 }
 
+#[must_use]
 pub const fn default_scrape_interval_secs() -> Duration {
     Duration::from_secs(15)
 }
 
+#[must_use]
 pub fn default_namespace() -> String {
     "awsecs".to_string()
 }
@@ -135,8 +146,8 @@ impl AwsEcsMetricsSourceConfig {
 }
 
 impl GenerateConfig for AwsEcsMetricsSourceConfig {
-    fn generate_config() -> toml::Value {
-        toml::Value::try_from(Self {
+    fn generate_config() -> serde_json::Value {
+        serde_json::to_value(Self {
             endpoint: default_endpoint(),
             version: default_version(),
             scrape_interval_secs: default_scrape_interval_secs(),
@@ -151,9 +162,9 @@ impl GenerateConfig for AwsEcsMetricsSourceConfig {
 impl SourceConfig for AwsEcsMetricsSourceConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
         let namespace = Some(self.namespace.clone()).filter(|namespace| !namespace.is_empty());
-        let http_client = HttpClient::new(None, &cx.proxy)?;
+        let http_client = HttpClient::new(MaybeTlsSettings::Raw(()), &cx.proxy)?;
 
-        Ok(Box::pin(aws_ecs_metrics(
+        Ok(crate::sources::source_with_error(aws_ecs_metrics(
             http_client,
             self.stats_endpoint(),
             self.scrape_interval_secs,
@@ -179,37 +190,42 @@ async fn aws_ecs_metrics(
     namespace: Option<String>,
     mut out: SourceSender,
     shutdown: ShutdownSignal,
-) -> Result<(), ()> {
+) -> vector_lib::source_sender::SendResult {
     let mut interval = IntervalStream::new(time::interval(interval)).take_until(shutdown);
-    let bytes_received = register!(BytesReceived::from(Protocol::HTTP));
+    let bytes_received = register(BytesReceived::from(Protocol::HTTP));
     while interval.next().await.is_some() {
         let request = Request::get(&url)
-            .body(Body::empty())
+            .body(empty_body())
             .expect("error creating request");
         let uri = request.uri().clone();
 
         match http_client.send(request).await {
-            Ok(response) if response.status() == hyper::StatusCode::OK => {
-                match hyper::body::to_bytes(response).await {
+            Ok(response) if response.status() == StatusCode::OK => {
+                match response
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(Collected::to_bytes)
+                {
                     Ok(body) => {
                         bytes_received.emit(ByteSize(body.len()));
 
-                        match parser::parse(body.as_ref(), namespace.clone()) {
+                        match parser::parse(body.as_ref(), namespace.as_deref()) {
                             Ok(metrics) => {
                                 let count = metrics.len();
-                                emit!(AwsEcsMetricsEventsReceived {
+                                emit(AwsEcsMetricsEventsReceived {
                                     byte_size: metrics.estimated_json_encoded_size_of(),
                                     count,
                                     endpoint: uri.path(),
                                 });
 
-                                if (out.send_batch(metrics).await).is_err() {
-                                    emit!(StreamClosedError { count });
-                                    return Err(());
+                                if let Err(error) = out.send_batch(metrics).await {
+                                    emit(StreamClosedError { count });
+                                    return Err(error);
                                 }
                             }
                             Err(error) => {
-                                emit!(AwsEcsMetricsParseError {
+                                emit(AwsEcsMetricsParseError {
                                     error,
                                     endpoint: &url,
                                     body: String::from_utf8_lossy(&body),
@@ -218,23 +234,23 @@ async fn aws_ecs_metrics(
                         }
                     }
                     Err(error) => {
-                        emit!(HttpClientHttpError {
+                        emit(HttpClientHttpError {
                             error: crate::Error::from(error),
-                            url: url.to_owned(),
+                            url: url.clone(),
                         });
                     }
                 }
             }
             Ok(response) => {
-                emit!(HttpClientHttpResponseError {
+                emit(HttpClientHttpResponseError {
                     code: response.status(),
-                    url: url.to_owned(),
+                    url: url.clone(),
                 });
             }
             Err(error) => {
-                emit!(HttpClientHttpError {
+                emit(HttpClientHttpError {
                     error: crate::Error::from(error),
-                    url: url.to_owned(),
+                    url: url.clone(),
                 });
             }
         }
@@ -245,30 +261,31 @@ async fn aws_ecs_metrics(
 
 #[cfg(test)]
 mod test {
-    use hyper::{
-        service::{make_service_fn, service_fn},
-        Body, Response, Server,
-    };
+    use std::convert::Infallible;
+
+    use bytes::Bytes;
+    use http::Response;
+    use http_body_util::Full;
     use tokio::time::Duration;
 
     use super::*;
     use crate::{
-        event::MetricValue,
+        event::{Event, MetricValue},
         test_util::{
-            components::{run_and_assert_source_compliance, SOURCE_TAGS},
-            next_addr, wait_for_tcp,
+            components::{SOURCE_TAGS, run_and_assert_source_compliance},
+            http::spawn_blackhole_http_server,
         },
-        Error,
     };
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Splitting this fixture is deferred to keep the lint cleanup mechanical. https://github.com/vectordotdev/vector/issues/23659"
+    )]
     #[tokio::test]
     async fn test_aws_ecs_metrics_source() {
-        let in_addr = next_addr();
-
-        let make_svc = make_service_fn(|_| async {
-            Ok::<_, Error>(service_fn(|_| async {
-                Ok::<_, Error>(Response::new(Body::from(
-                    r#"
+        let uri = spawn_blackhole_http_server(|_| async {
+            Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(
+                r#"
                     {
                         "0cf54b87-f0f0-4044-b9d6-20dc54d5c414-3822082590": {
                             "read": "2020-09-23T20:32:26.292561674Z",
@@ -559,20 +576,15 @@ mod test {
                             }
                         }
                     }
-                    "#,
-                )))
-            }))
-        });
-
-        tokio::spawn(async move {
-            if let Err(error) = Server::bind(&in_addr).serve(make_svc).await {
-                error!(message = "Server error.", %error);
-            }
-        });
-        wait_for_tcp(in_addr).await;
+                    "#
+                .as_bytes(),
+            ))))
+        })
+        .await;
+        let in_addr = uri.authority().unwrap();
 
         let config = AwsEcsMetricsSourceConfig {
-            endpoint: format!("http://{}", in_addr),
+            endpoint: format!("http://{in_addr}"),
             version: Version::V4,
             scrape_interval_secs: Duration::from_secs(1),
             namespace: default_namespace(),
@@ -580,11 +592,11 @@ mod test {
 
         let events =
             run_and_assert_source_compliance(config, Duration::from_secs(1), &SOURCE_TAGS).await;
-        assert!(!events.is_empty());
+        assert_ne!(events, [] as [vector_lib::event::Event; 0]);
 
         let metrics = events
             .into_iter()
-            .map(|e| e.into_metric())
+            .map(Event::into_metric)
             .collect::<Vec<_>>();
 
         match metrics
@@ -592,18 +604,20 @@ mod test {
             .find(|m| m.name() == "network_receive_bytes_total")
         {
             Some(m) => {
-                assert_eq!(m.value(), &MetricValue::Counter { value: 329932716.0 });
+                assert_eq!(
+                    m.value(),
+                    &MetricValue::Counter {
+                        value: 329_932_716.0
+                    }
+                );
                 assert_eq!(m.namespace(), Some("awsecs"));
 
                 match m.tags() {
                     Some(tags) => assert_eq!(tags.get("device"), Some("eth1")),
-                    None => panic!("No tags for metric. {:?}", m),
+                    None => panic!("No tags for metric. {m:?}"),
                 }
             }
-            None => panic!(
-                "Could not find 'network_receive_bytes_total' in {:?}.",
-                metrics
-            ),
+            None => panic!("Could not find 'network_receive_bytes_total' in {metrics:?}."),
         }
     }
 }
@@ -614,14 +628,14 @@ mod integration_tests {
     use tokio::time::Duration;
 
     use super::*;
-    use crate::test_util::components::{run_and_assert_source_compliance, SOURCE_TAGS};
+    use crate::test_util::components::{SOURCE_TAGS, run_and_assert_source_compliance};
 
     fn ecs_address() -> String {
         env::var("ECS_ADDRESS").unwrap_or_else(|_| "http://localhost:9088".into())
     }
 
     fn ecs_url(version: &str) -> String {
-        format!("{}/{}", ecs_address(), version)
+        format!("{}/{version}", ecs_address())
     }
 
     async fn scrape_metrics(endpoint: String, version: Version) {
@@ -634,7 +648,7 @@ mod integration_tests {
 
         let events =
             run_and_assert_source_compliance(config, Duration::from_secs(5), &SOURCE_TAGS).await;
-        assert!(!events.is_empty());
+        assert_ne!(events, [] as [vector_lib::event::Event; 0]);
     }
 
     #[tokio::test]

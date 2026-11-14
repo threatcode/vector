@@ -1,19 +1,27 @@
-use metrics::counter;
-use vector_lib::internal_event::InternalEvent;
 use vector_lib::{
-    internal_event::{error_stage, error_type},
-    json_size::JsonSize,
+    NamedInternalEvent, counter,
+    internal_event::{CounterName, InternalEvent, error_stage, error_type},
 };
 
 use super::prelude::http_error_code;
 
-#[derive(Debug)]
-pub struct HttpClientEventsReceived {
-    pub byte_size: JsonSize,
+#[cfg(any(
+    feature = "sources-http_client",
+    feature = "sources-prometheus_scrape",
+    feature = "sources-okta"
+))]
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct HttpClientEventsReceived {
+    pub byte_size: vector_lib::json_size::JsonSize,
     pub count: usize,
     pub url: String,
 }
 
+#[cfg(any(
+    feature = "sources-http_client",
+    feature = "sources-prometheus_scrape",
+    feature = "sources-okta"
+))]
 impl InternalEvent for HttpClientEventsReceived {
     fn emit(self) {
         trace!(
@@ -23,19 +31,21 @@ impl InternalEvent for HttpClientEventsReceived {
             url = %self.url,
         );
         counter!(
-            "component_received_events_total", self.count as u64,
+            CounterName::ComponentReceivedEventsTotal,
             "uri" => self.url.clone(),
-        );
+        )
+        .increment(self.count as u64);
         counter!(
-            "component_received_event_bytes_total", self.byte_size.get() as u64,
+            CounterName::ComponentReceivedEventBytesTotal,
             "uri" => self.url.clone(),
-        );
+        )
+        .increment(self.byte_size.get() as u64);
     }
 }
 
-#[derive(Debug)]
-pub struct HttpClientHttpResponseError {
-    pub code: hyper::StatusCode,
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct HttpClientHttpResponseError {
+    pub code: http::StatusCode,
     pub url: String,
 }
 
@@ -47,20 +57,20 @@ impl InternalEvent for HttpClientHttpResponseError {
             stage = error_stage::RECEIVING,
             error_type = error_type::REQUEST_FAILED,
             error_code = %http_error_code(self.code.as_u16()),
-            internal_log_rate_limit = true,
         );
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "url" => self.url,
             "stage" => error_stage::RECEIVING,
             "error_type" => error_type::REQUEST_FAILED,
             "error_code" => http_error_code(self.code.as_u16()),
-        );
+        )
+        .increment(1);
     }
 }
 
-#[derive(Debug)]
-pub struct HttpClientHttpError {
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct HttpClientHttpError {
     pub error: crate::Error,
     pub url: String,
 }
@@ -73,13 +83,13 @@ impl InternalEvent for HttpClientHttpError {
             error = ?self.error,
             error_type = error_type::REQUEST_FAILED,
             stage = error_stage::RECEIVING,
-            internal_log_rate_limit = true,
         );
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "url" => self.url,
             "error_type" => error_type::REQUEST_FAILED,
             "stage" => error_stage::RECEIVING,
-        );
+        )
+        .increment(1);
     }
 }

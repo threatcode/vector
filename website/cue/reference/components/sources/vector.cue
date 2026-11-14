@@ -10,8 +10,7 @@ components: sources: vector: {
 		"""
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["aggregator"]
 		development:   "stable"
 		egress_method: "stream"
@@ -46,14 +45,15 @@ components: sources: vector: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.vector.configuration
+	configuration: generated.components.sources.vector.configuration & {
+		address: type: string: examples: ["0.0.0.0:6000"]
+	}
 
 	output: {
 		logs: event: {
@@ -97,12 +97,14 @@ components: sources: vector: {
 				tags: _extra_tags
 			}
 		}
+		traces: "": {
+			description: "Trace events received from an upstream Vector instance."
+		}
 	}
 
 	telemetry: metrics: {
 		grpc_server_handler_duration_seconds: components.sources.internal_metrics.output.metrics.grpc_server_handler_duration_seconds
 		grpc_server_messages_received_total:  components.sources.internal_metrics.output.metrics.grpc_server_messages_received_total
 		grpc_server_messages_sent_total:      components.sources.internal_metrics.output.metrics.grpc_server_messages_sent_total
-		protobuf_decode_errors_total:         components.sources.internal_metrics.output.metrics.protobuf_decode_errors_total
 	}
 }

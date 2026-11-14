@@ -26,6 +26,19 @@ title = "Vector"
 contentDir = "content/en"
 weight = 1
 
+# Declaring any content mount drops Hugo's default one, so content/en is mounted explicitly.
+[[module.mounts]]
+source = "content/en"
+target = "content"
+lang = "en"
+
+# Active deprecation notices live in the repository root; see deprecation.d/README.md.
+[[module.mounts]]
+source = "../deprecation.d"
+target = "content/deprecations/active"
+lang = "en"
+excludeFiles = ["README.md"]
+
 [params]
 description = "A lightweight, ultra-fast tool for building observability pipelines"
 tagline = "Take control of your observability stack"
@@ -45,12 +58,6 @@ site_generation = 2
 
 # Search
 [params.search]
-algolia_app_id = "EOIG7V0A2O"
-# Note that it's okay to use this on the front end: https://www.algolia.com/doc/guides/security/api-keys/#search-only-api-key
-algolia_public_api_key = "5f712eef8e5dcf4ac4bbbd0099960626"
-
-algolia_index_prod = "vector_docs_prod"
-algolia_index_staging = "vector_docs_staging"
 algolia_autocomplete_theme = "classic"
 
 # VRL JSON server
@@ -63,7 +70,7 @@ delimiter = ""
 mediaType = "text/netlify"
 baseName = "_redirects"
 
-# Outputs (including search.json and _redirects files)
+# Outputs (including the VRL JSON endpoint and _redirects files)
 [outputs]
 home = ["HTML", "JSON", "RSS", "REDIRECTS"]
 
@@ -90,8 +97,9 @@ discord = "https://chat.vector.dev"
 
 # Datadog configuration
 [params.datadog_config]
-application_id = "0b95923b-b06d-445b-893f-a861e93d6ea3"
-client_token = "puba5f23a97d613091ae2ca8c0f4a135af4"
+application_id = "894af722-5919-4a62-97fc-33f49bc52803"
+client_token = "pubcee1dc56e7f5bd03397cc3624eb7961c"
+site = "datadoghq.com"
 service_name = "vector"
 
 ## Menus
@@ -154,37 +162,37 @@ weight = 7
 # Footer menu
 [[languages.en.menus.footer]]
 name = "About"
-identifier = "about"
+identifier = "introduction"
 weight = 1
 
 [[languages.en.menus.footer]]
-name = "What is Vector?"
-url = "/docs/about"
-parent = "about"
+name = "Vector"
+url = "/docs/introduction"
+parent = "introduction"
 weight = 1
-
-[[languages.en.menus.footer]]
-name = "What is Observability Pipelines?"
-url = "/docs/about/what-is-observability-pipelines"
-parent = "about"
-weight = 2
 
 [[languages.en.menus.footer]]
 name = "Contact us"
 url = "/community"
-parent = "about"
+parent = "introduction"
+weight = 2
+
+[[languages.en.menus.footer]]
+name = "The Team"
+url = "https://opensource.datadoghq.com/about/#the-community-open-source-engineering-team"
+parent = "introduction"
 weight = 3
 
 [[languages.en.menus.footer]]
 name = "Privacy"
 url = "https://www.datadoghq.com/legal/privacy/"
-parent = "about"
+parent = "introduction"
 weight = 4
 
 [[languages.en.menus.footer]]
 name = "Cookies"
 url = "https://www.datadoghq.com/legal/cookies/"
-parent = "about"
+parent = "introduction"
 weight = 5
 
 [[languages.en.menus.footer]]
@@ -260,8 +268,8 @@ parent = "community"
 weight = 1
 
 [[languages.en.menus.footer]]
-name = "Twitter"
-url = "https://twitter.com/vectordotdev"
+name = "X"
+url = "https://x.com/vectordotdev"
 parent = "community"
 weight = 2
 
@@ -272,7 +280,7 @@ parent = "community"
 weight = 3
 
 [[languages.en.menus.footer]]
-name = "Download"
+name = "Product"
 url = "/download"
 identifier = "download"
 weight = 5
@@ -281,6 +289,18 @@ weight = 5
 name = "Releases"
 url = "/releases"
 weight = 1
+parent = "download"
+
+[[languages.en.menus.footer]]
+name = "Deprecations"
+url = "/deprecations"
+weight = 2
+parent = "download"
+
+[[languages.en.menus.footer]]
+name = "Highlights"
+url = "/highlights"
+weight = 3
 parent = "download"
 
 # Extra links under the "Meta" section in the docs
@@ -315,9 +335,9 @@ weight = 2
 
 # Mini icons in navbar and footer
 [[languages.en.menus.comms]]
-name = "Twitter"
-params = { color = "twitter-blue", icon = "twitter" }
-url = "https://twitter.com/vectordotdev"
+name = "X"
+params = { color = "black", dark = "white", icon = "x" }
+url = "https://x.com/vectordotdev"
 weight = 1
 
 [[languages.en.menus.comms]]

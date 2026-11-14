@@ -9,16 +9,19 @@ pub struct NativeJsonSerializerConfig;
 
 impl NativeJsonSerializerConfig {
     /// Build the `NativeJsonSerializer` from this configuration.
+    #[must_use]
     pub const fn build(&self) -> NativeJsonSerializer {
         NativeJsonSerializer
     }
 
     /// The data type of events that are accepted by `NativeJsonSerializer`.
+    #[must_use]
     pub fn input_type(&self) -> DataType {
-        DataType::all()
+        DataType::all_bits()
     }
 
     /// The schema required by the serializer.
+    #[must_use]
     pub fn schema_requirement(&self) -> schema::Requirement {
         schema::Requirement::empty()
     }
@@ -29,12 +32,16 @@ impl NativeJsonSerializerConfig {
 pub struct NativeJsonSerializer;
 
 impl NativeJsonSerializer {
-    /// Creates a new `NativeJsonSerializer`.
-    pub const fn new() -> Self {
-        Self
-    }
-
     /// Encode event and represent it as native JSON value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event cannot be serialized to JSON.
+    // https://github.com/vectordotdev/vector/issues/23659
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "Keep the existing owned-argument API during the lint rollout."
+    )]
     pub fn to_json_value(&self, event: Event) -> Result<serde_json::Value, vector_common::Error> {
         serde_json::to_value(&event).map_err(|e| e.to_string().into())
     }
@@ -52,18 +59,20 @@ impl Encoder<Event> for NativeJsonSerializer {
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
-    use vector_core::buckets;
-    use vector_core::event::{LogEvent, Metric, MetricKind, MetricValue, Value};
-    use vrl::btreemap;
+    use vector_core::{
+        buckets,
+        event::{LogEvent, Metric, MetricKind, MetricValue, Value},
+    };
+    use vrl::objectmap;
 
     use super::*;
 
     #[test]
     fn serialize_json() {
-        let event = Event::Log(LogEvent::from(btreemap! {
+        let event = Event::Log(LogEvent::from(objectmap! {
             "foo" => Value::from("bar")
         }));
-        let mut serializer = NativeJsonSerializer::new();
+        let mut serializer = NativeJsonSerializer;
         let mut bytes = BytesMut::new();
 
         serializer.encode(event, &mut bytes).unwrap();
@@ -73,10 +82,10 @@ mod tests {
 
     #[test]
     fn serialize_equals_to_json_value() {
-        let event = Event::Log(LogEvent::from(btreemap! {
+        let event = Event::Log(LogEvent::from(objectmap! {
             "foo" => Value::from("bar")
         }));
-        let mut serializer = NativeJsonSerializer::new();
+        let mut serializer = NativeJsonSerializer;
         let mut bytes = BytesMut::new();
 
         serializer.encode(event.clone(), &mut bytes).unwrap();
@@ -93,17 +102,19 @@ mod tests {
             MetricKind::Absolute,
             MetricValue::AggregatedHistogram {
                 count: 1,
-                sum: 1.0,
+                sum: Some(1.0),
                 buckets: buckets!(f64::NEG_INFINITY => 0 ,2.0 => 1, f64::INFINITY => 0),
             },
         ));
 
-        let mut serializer = NativeJsonSerializer::new();
+        let mut serializer = NativeJsonSerializer;
         let mut bytes = BytesMut::new();
         serializer
             .encode(histogram_event.clone(), &mut bytes)
             .unwrap();
-        let json = serializer.to_json_value(histogram_event).unwrap();
-        assert_eq!(bytes.freeze(), serde_json::to_string(&json).unwrap());
+        assert_eq!(
+            bytes.freeze(),
+            serde_json::to_string(&histogram_event).unwrap()
+        );
     }
 }

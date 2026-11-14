@@ -1,5 +1,7 @@
 use vector_lib::event::{Metric, MetricValue};
+use vector_lib::internal_event::emit;
 
+use super::request_builder::StackdriverMetricsRequestBuilder;
 use crate::sinks::{
     prelude::*,
     util::{
@@ -8,16 +10,15 @@ use crate::sinks::{
     },
 };
 
-use super::request_builder::StackdriverMetricsRequestBuilder;
-
 #[derive(Clone, Debug, Default)]
 struct StackdriverMetricsNormalize;
 
 impl MetricNormalize for StackdriverMetricsNormalize {
     fn normalize(&mut self, state: &mut MetricSet, metric: Metric) -> Option<Metric> {
         match (metric.kind(), &metric.value()) {
-            (_, MetricValue::Counter { .. }) => state.make_absolute(metric),
-            (_, MetricValue::Gauge { .. }) => state.make_absolute(metric),
+            (_, MetricValue::Counter { .. } | MetricValue::Gauge { .. }) => {
+                state.make_absolute(metric)
+            }
             // All others are left as-is
             _ => Some(metric),
         }
@@ -57,10 +58,9 @@ where
                 let metric = event.into_metric();
 
                 future::ready(match metric.value() {
-                    &MetricValue::Counter { .. } => Some(metric),
-                    &MetricValue::Gauge { .. } => Some(metric),
+                    &MetricValue::Counter { .. } | &MetricValue::Gauge { .. } => Some(metric),
                     not_supported => {
-                        warn!("Unsupported metric type: {:?}.", not_supported);
+                        warn!("Unsupported metric type: {not_supported:?}.");
                         None
                     }
                 })
@@ -74,7 +74,7 @@ where
             .filter_map(|request| async move {
                 match request {
                     Err(error) => {
-                        emit!(SinkRequestBuildError { error });
+                        emit(SinkRequestBuildError { error });
                         None
                     }
                     Ok(req) => Some(req),

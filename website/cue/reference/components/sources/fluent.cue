@@ -6,8 +6,7 @@ components: sources: fluent: {
 	title: "Fluent"
 
 	classes: {
-		commonly_used: true
-		delivery:      "best_effort"
+		delivery: "best_effort"
 		deployment_roles: ["sidecar", "aggregator"]
 		development:   "beta"
 		egress_method: "stream"
@@ -44,14 +43,13 @@ components: sources: fluent: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.fluent.configuration
+	configuration: generated.components.sources.fluent.configuration
 
 	output: logs: line: {
 		description: "A Fluent message"

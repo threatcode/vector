@@ -3,15 +3,12 @@ package metadata
 components: sources: demo_logs: {
 	title: "Demo Logs"
 
-	alias: "generator"
-
 	description: """
 		Generates fakes events useful for testing and demoing.
 		"""
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["daemon", "sidecar"]
 		development:   "stable"
 		egress_method: "stream"
@@ -32,14 +29,13 @@ components: sources: demo_logs: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.demo_logs.configuration
+	configuration: generated.components.sources.demo_logs.configuration
 
 	output: {
 		logs: line: {

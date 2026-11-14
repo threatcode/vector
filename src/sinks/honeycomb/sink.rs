@@ -1,11 +1,11 @@
 //! Implementation of the `honeycomb` sink.
 
+use super::request_builder::HoneycombRequestBuilder;
 use crate::sinks::{
     prelude::*,
     util::http::{HttpJsonBatchSizer, HttpRequest},
 };
-
-use super::request_builder::HoneycombRequestBuilder;
+use vector_lib::internal_event::emit;
 
 pub(super) struct HoneycombSink<S> {
     service: S,
@@ -46,7 +46,7 @@ where
             .filter_map(|request| async move {
                 match request {
                     Err(error) => {
-                        emit!(SinkRequestBuildError { error });
+                        emit(SinkRequestBuildError { error });
                         None
                     }
                     Ok(req) => Some(req),

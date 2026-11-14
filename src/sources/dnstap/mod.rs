@@ -1,37 +1,40 @@
 use std::path::PathBuf;
+use vector_lib::internal_event::{emit, register};
 
-use base64::prelude::{Engine as _, BASE64_STANDARD};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use dnsmsg_parser::dns_message_parser::DnsParserOptions;
-use vector_lib::event::{Event, LogEvent};
-use vector_lib::internal_event::{
-    ByteSize, BytesReceived, InternalEventHandle, Protocol, Registered,
+use dnstap_parser::{
+    parser::DnstapParser,
+    schema::{DNSTAP_VALUE_PATHS, DnstapEventSchema},
 };
-use vector_lib::lookup::{owned_value_path, path};
-use vector_lib::{configurable::configurable_component, tls::MaybeTlsSettings};
-use vrl::path::{OwnedValuePath, PathPrefix};
-use vrl::value::{kind::Collection, Kind};
-
-use self::parser::DnstapParser;
+use vector_lib::{
+    configurable::configurable_component,
+    event::{Event, LogEvent},
+    internal_event::{ByteSize, BytesReceived, InternalEventHandle, Protocol, Registered},
+    lookup::{owned_value_path, path},
+    tls::MaybeTlsSettings,
+};
+use vrl::{
+    path::{OwnedValuePath, PathPrefix},
+    value::{Kind, kind::Collection},
+};
 
 use super::util::framestream::{
-    build_framestream_tcp_source, build_framestream_unix_source, FrameHandler,
+    FrameHandler, build_framestream_tcp_source, build_framestream_unix_source,
 };
-use crate::internal_events::DnstapParseError;
-use crate::sources::dnstap::schema::DNSTAP_VALUE_PATHS;
 use crate::{
-    config::{log_schema, DataType, SourceConfig, SourceContext, SourceOutput},
     Result,
+    config::{DataType, SourceConfig, SourceContext, SourceOutput, log_schema},
+    internal_events::DnstapParseError,
 };
 
-pub mod parser;
-pub mod schema;
 pub mod tcp;
 #[cfg(unix)]
 pub mod unix;
-use dnsmsg_parser::{dns_message, dns_message_parser};
-pub use schema::DnstapEventSchema;
-use vector_lib::config::{LegacyKey, LogNamespace};
-use vector_lib::lookup::lookup_v2::OptionalValuePath;
+use vector_lib::{
+    config::{LegacyKey, LogNamespace},
+    lookup::lookup_v2::OptionalValuePath,
+};
 
 /// Configuration for the `dnstap` source.
 #[configurable_component(source("dnstap", "Collect DNS logs from a dnstap-compatible server."))]
@@ -66,7 +69,7 @@ pub struct DnstapConfig {
     pub multithreaded: Option<bool>,
 
     /// Maximum number of frames that can be processed concurrently.
-    pub max_frame_handling_tasks: Option<u32>,
+    pub max_frame_handling_tasks: Option<usize>,
 
     /// Whether to downcase all DNSTAP hostnames received for consistency
     #[serde(default = "crate::serde::default_false")]
@@ -78,6 +81,10 @@ pub struct DnstapConfig {
     pub log_namespace: Option<bool>,
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing numeric representation of these protocol fixtures. https://github.com/vectordotdev/vector/issues/23659"
+)]
 fn default_max_frame_length() -> usize {
     bytesize::kib(100u64) as usize
 }
@@ -98,6 +105,7 @@ pub enum Mode {
 }
 
 impl DnstapConfig {
+    #[must_use]
     pub fn new(socket_path: PathBuf) -> Self {
         Self {
             mode: Mode::Unix(unix::UnixConfig::new(socket_path)),
@@ -113,6 +121,7 @@ impl DnstapConfig {
         self.raw_data_only.unwrap_or(false)
     }
 
+    #[must_use]
     pub fn schema_definition(&self, log_namespace: LogNamespace) -> vector_lib::schema::Definition {
         let event_schema = DnstapEventSchema;
 
@@ -120,14 +129,10 @@ impl DnstapConfig {
             LogNamespace::Legacy => {
                 let schema = vector_lib::schema::Definition::empty_legacy_namespace();
 
-                if self.raw_data_only() {
-                    if let Some(message_key) = log_schema().message_key() {
-                        return schema.with_event_field(
-                            message_key,
-                            Kind::bytes(),
-                            Some("message"),
-                        );
-                    }
+                if self.raw_data_only()
+                    && let Some(message_key) = log_schema().message_key()
+                {
+                    return schema.with_event_field(message_key, Kind::bytes(), Some("message"));
                 }
                 event_schema.schema_definition(schema)
             }
@@ -185,7 +190,7 @@ impl SourceConfig for DnstapConfig {
             Mode::Tcp(config) => {
                 let tls_config = config.tls().as_ref().map(|tls| tls.tls_config.clone());
 
-                let tls = MaybeTlsSettings::from_config(&tls_config, true)?;
+                let tls = MaybeTlsSettings::from_config(tls_config.as_ref(), true)?;
                 let frame_handler = tcp::DnstapFrameHandler::new(
                     config.clone(),
                     tls,
@@ -197,8 +202,7 @@ impl SourceConfig for DnstapConfig {
             }
             #[cfg(unix)]
             Mode::Unix(config) => {
-                let frame_handler =
-                    unix::DnstapFrameHandler::new(config.clone(), common_frame_handler);
+                let frame_handler = unix::DnstapFrameHandler::new(config, common_frame_handler);
                 build_framestream_unix_source(frame_handler, cx.shutdown, cx.out)
             }
         }
@@ -209,7 +213,10 @@ impl SourceConfig for DnstapConfig {
         let schema_definition = self
             .schema_definition(log_namespace)
             .with_standard_vector_source_metadata();
-        vec![SourceOutput::new_logs(DataType::Log, schema_definition)]
+        vec![SourceOutput::new_maybe_logs(
+            DataType::Log,
+            schema_definition,
+        )]
     }
 
     fn can_acknowledge(&self) -> bool {
@@ -223,7 +230,7 @@ struct CommonFrameHandler {
     content_type: String,
     raw_data_only: bool,
     multithreaded: bool,
-    max_frame_handling_tasks: u32,
+    max_frame_handling_tasks: usize,
     host_key: Option<OwnedValuePath>,
     timestamp_key: Option<OwnedValuePath>,
     source_type_key: Option<OwnedValuePath>,
@@ -233,7 +240,7 @@ struct CommonFrameHandler {
 }
 
 impl CommonFrameHandler {
-    pub fn new(config: &DnstapConfig, log_namespace: LogNamespace) -> Self {
+    fn new(config: &DnstapConfig, log_namespace: LogNamespace) -> Self {
         let source_type_key = log_schema().source_type_key();
         let timestamp_key = log_schema().timestamp_key();
 
@@ -251,7 +258,7 @@ impl CommonFrameHandler {
             host_key,
             timestamp_key: timestamp_key.cloned(),
             source_type_key: source_type_key.cloned(),
-            bytes_received: register!(BytesReceived::from(Protocol::from("protobuf"))),
+            bytes_received: register(BytesReceived::from(Protocol::from("protobuf"))),
             lowercase_hostnames: config.lowercase_hostnames,
             log_namespace,
         }
@@ -269,7 +276,7 @@ impl FrameHandler for CommonFrameHandler {
 
     fn handle_event(
         &self,
-        received_from: Option<vrl::prelude::Bytes>,
+        received_from: Option<String>,
         frame: vrl::prelude::Bytes,
     ) -> Option<vector_lib::event::Event> {
         self.bytes_received.emit(ByteSize(frame.len()));
@@ -298,8 +305,8 @@ impl FrameHandler for CommonFrameHandler {
                 lowercase_hostnames: self.lowercase_hostnames,
             },
         ) {
-            emit!(DnstapParseError {
-                error: format!("Dnstap protobuf decode error {:?}.", err)
+            emit(DnstapParseError {
+                error: format!("Dnstap protobuf decode error {err:?}."),
             });
             return None;
         }
@@ -328,7 +335,7 @@ impl FrameHandler for CommonFrameHandler {
         self.multithreaded
     }
 
-    fn max_frame_handling_tasks(&self) -> u32 {
+    fn max_frame_handling_tasks(&self) -> usize {
         self.max_frame_handling_tasks
     }
 
@@ -348,6 +355,7 @@ impl FrameHandler for CommonFrameHandler {
 #[cfg(test)]
 mod tests {
     use vector_lib::event::{Event, LogEvent};
+    use vrl::event_path;
 
     use super::*;
 
@@ -399,7 +407,9 @@ mod tests {
 
         let json: serde_json::Value = serde_json::from_str(record).unwrap();
         let mut event = Event::from(LogEvent::from(vrl::value::Value::from(json)));
-        event.as_mut_log().insert("timestamp", chrono::Utc::now());
+        event
+            .as_mut_log()
+            .insert(event_path!("timestamp"), chrono::Utc::now());
 
         let definition = DnstapEventSchema;
         let schema = vector_lib::schema::Definition::empty_legacy_namespace()
@@ -407,7 +417,7 @@ mod tests {
 
         definition
             .schema_definition(schema)
-            .assert_valid_for_event(&event)
+            .assert_valid_for_event(&event);
     }
 }
 
@@ -415,24 +425,25 @@ mod tests {
 mod integration_tests {
     #![allow(clippy::print_stdout)] // tests
 
-    use bollard::exec::{CreateExecOptions, StartExecOptions};
-    use bollard::Docker;
+    use bollard::{
+        Docker,
+        exec::{CreateExecOptions, StartExecOptions},
+    };
     use futures::StreamExt;
     use serde_json::json;
     use tokio::time;
-    use vector_lib::event::Event;
-    use vector_lib::lookup::lookup_v2::OptionalValuePath;
+    use vector_lib::{event::Event, lookup::lookup_v2::OptionalValuePath};
+    use vrl::event_path;
 
     use self::unix::UnixConfig;
-
     use super::*;
     use crate::{
+        SourceSender,
         event::Value,
         test_util::{
-            components::{assert_source_compliance, SOURCE_TAGS},
+            components::{SOURCE_TAGS, assert_source_compliance},
             wait_for,
         },
-        SourceSender,
     };
 
     async fn test_dnstap(raw_data: bool, query_type: &'static str) {
@@ -446,14 +457,14 @@ mod integration_tests {
                     mode: Mode::Unix(UnixConfig {
                         socket_path: socket,
                         socket_file_mode: Some(511),
-                        socket_receive_buffer_size: Some(10485760),
-                        socket_send_buffer_size: Some(10485760),
+                        socket_receive_buffer_size: Some(10_485_760),
+                        socket_send_buffer_size: Some(10_485_760),
                     }),
-                    max_frame_length: 102400,
+                    max_frame_length: 102_400,
                     host_key: Some(OptionalValuePath::from(owned_value_path!("key"))),
                     raw_data_only: Some(raw_data),
                     multithreaded: Some(false),
-                    max_frame_handling_tasks: Some(100000),
+                    max_frame_handling_tasks: Some(100_000),
                     lowercase_hostnames: false,
                     log_namespace: None,
                 }
@@ -461,7 +472,7 @@ mod integration_tests {
                 .await
                 .unwrap()
                 .await
-                .unwrap()
+                .unwrap();
             });
 
             send_query(raw_data, query_type);
@@ -479,7 +490,7 @@ mod integration_tests {
                         break;
                     }
                     Err(e) => {
-                        println!("Error: {}", e);
+                        println!("Error: {e}");
                         break;
                     }
                 }
@@ -522,7 +533,9 @@ mod integration_tests {
         if raw_data {
             assert_eq!(events.len(), 2);
             assert!(
-                events.iter().all(|v| v.as_log().get("rawData").is_some()),
+                events
+                    .iter()
+                    .all(|v| v.as_log().get(event_path!("rawData")).is_some()),
                 "No rawData field!"
             );
         } else if query_event == "query" {
@@ -530,13 +543,15 @@ mod integration_tests {
             assert!(
                 events
                     .iter()
-                    .any(|v| v.as_log().get("messageType")
+                    .any(|v| v.as_log().get(event_path!("messageType"))
                         == Some(&Value::Bytes("ClientQuery".into()))),
                 "No ClientQuery event!"
             );
             assert!(
-                events.iter().any(|v| v.as_log().get("messageType")
-                    == Some(&Value::Bytes("ClientResponse".into()))),
+                events
+                    .iter()
+                    .any(|v| v.as_log().get(event_path!("messageType"))
+                        == Some(&Value::Bytes("ClientResponse".into()))),
                 "No ClientResponse event!"
             );
         } else if query_event == "update" {
@@ -544,26 +559,28 @@ mod integration_tests {
             assert!(
                 events
                     .iter()
-                    .any(|v| v.as_log().get("messageType")
+                    .any(|v| v.as_log().get(event_path!("messageType"))
                         == Some(&Value::Bytes("UpdateQuery".into()))),
                 "No UpdateQuery event!"
             );
             assert!(
-                events.iter().any(|v| v.as_log().get("messageType")
-                    == Some(&Value::Bytes("UpdateResponse".into()))),
+                events
+                    .iter()
+                    .any(|v| v.as_log().get(event_path!("messageType"))
+                        == Some(&Value::Bytes("UpdateResponse".into()))),
                 "No UpdateResponse event!"
             );
             assert!(
                 events
                     .iter()
-                    .any(|v| v.as_log().get("messageType")
+                    .any(|v| v.as_log().get(event_path!("messageType"))
                         == Some(&Value::Bytes("AuthQuery".into()))),
                 "No UpdateQuery event!"
             );
             assert!(
                 events
                     .iter()
-                    .any(|v| v.as_log().get("messageType")
+                    .any(|v| v.as_log().get(event_path!("messageType"))
                         == Some(&Value::Bytes("AuthResponse".into()))),
                 "No UpdateResponse event!"
             );
@@ -622,7 +639,7 @@ mod integration_tests {
         }
     }
 
-    fn get_bind_ports(raw_data: bool, query_type: &'static str) -> (&str, &str) {
+    fn get_bind_ports(raw_data: bool, query_type: &'static str) -> (&'static str, &'static str) {
         // Returns the query port and control port, respectively, for the given BIND instance.
         match query_type {
             "query" if raw_data => ("8001", "9001"),
@@ -633,7 +650,7 @@ mod integration_tests {
     }
 
     async fn dnstap_exec(cmd: Vec<&str>) {
-        let docker = Docker::connect_with_unix_defaults().expect("failed binding to docker socket");
+        let docker = Docker::connect_with_defaults().expect("failed binding to docker socket");
         let config = CreateExecOptions {
             cmd: Some(cmd),
             attach_stdout: Some(true),
@@ -658,22 +675,22 @@ mod integration_tests {
             "dnstap",
             "-reopen",
         ])
-        .await
+        .await;
     }
 
     async fn nslookup(port: &str) {
         dnstap_exec(vec![
             "nslookup",
             "-type=A",
-            format!("-port={}", port).as_str(),
+            format!("-port={port}").as_str(),
             "h1.example.com",
             "localhost",
         ])
-        .await
+        .await;
     }
 
     async fn nsupdate() {
-        dnstap_exec(vec!["nsupdate", "-v", "/bind3/etc/bind/nsupdate.txt"]).await
+        dnstap_exec(vec!["nsupdate", "-v", "/bind3/etc/bind/nsupdate.txt"]).await;
     }
 
     #[tokio::test]

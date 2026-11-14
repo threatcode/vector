@@ -2,6 +2,7 @@
 pub mod prelude;
 
 mod adaptive_concurrency;
+#[cfg(feature = "transforms-aggregate")]
 mod aggregate;
 #[cfg(any(feature = "sources-amqp", feature = "sinks-amqp"))]
 mod amqp;
@@ -27,11 +28,12 @@ mod aws_kinesis_firehose;
 #[cfg(any(feature = "sources-aws_s3", feature = "sources-aws_sqs",))]
 mod aws_sqs;
 mod batch;
-mod codecs;
 mod common;
 mod conditions;
 #[cfg(feature = "sources-datadog_agent")]
 mod datadog_agent;
+#[cfg(feature = "sinks-datadog_logs")]
+mod datadog_logs;
 #[cfg(feature = "sinks-datadog_metrics")]
 mod datadog_metrics;
 #[cfg(feature = "sinks-datadog_traces")]
@@ -40,16 +42,25 @@ mod datadog_traces;
 mod dedupe;
 #[cfg(feature = "sources-demo_logs")]
 mod demo_logs;
-#[cfg(feature = "sources-dnstap")]
+mod disk_buffer;
+#[cfg(all(unix, feature = "sources-dnstap"))]
 mod dnstap;
 #[cfg(feature = "sources-docker_logs")]
 mod docker_logs;
+#[cfg(feature = "sinks-doris")]
+mod doris;
 mod encoding_transcode;
 #[cfg(feature = "sources-eventstoredb_metrics")]
 mod eventstoredb_metrics;
 #[cfg(feature = "sources-exec")]
 mod exec;
-#[cfg(any(feature = "sources-file-descriptor", feature = "sources-stdin"))]
+#[cfg(any(
+    feature = "sources-file",
+    feature = "sources-kubernetes_logs",
+    feature = "sinks-file",
+))]
+mod file;
+#[cfg(any(feature = "sources-file_descriptor", feature = "sources-stdin"))]
 mod file_descriptor;
 #[cfg(feature = "transforms-filter")]
 mod filter;
@@ -70,8 +81,6 @@ mod http_client_source;
 mod influxdb;
 #[cfg(feature = "sources-internal_logs")]
 mod internal_logs;
-#[cfg(feature = "sources-internal_metrics")]
-mod internal_metrics;
 #[cfg(all(unix, feature = "sources-journald"))]
 mod journald;
 #[cfg(any(feature = "sources-kafka", feature = "sinks-kafka"))]
@@ -80,6 +89,7 @@ mod kafka;
 mod kubernetes_logs;
 #[cfg(feature = "transforms-log_to_metric")]
 mod log_to_metric;
+#[cfg(feature = "sources-heroku_logs")]
 mod logplex;
 #[cfg(feature = "sinks-loki")]
 mod loki;
@@ -89,18 +99,23 @@ mod lua;
 mod metric_to_log;
 #[cfg(feature = "sources-mongodb_metrics")]
 mod mongodb_metrics;
-#[cfg(feature = "sinks-mqtt")]
+#[cfg(any(feature = "sinks-mqtt", feature = "sources-mqtt"))]
 mod mqtt;
 #[cfg(feature = "sources-nginx_metrics")]
 mod nginx_metrics;
 mod open;
+#[cfg(any(
+    feature = "sources-kubernetes_logs",
+    feature = "transforms-log_to_metric",
+    feature = "sinks-datadog_events",
+))]
 mod parser;
 #[cfg(feature = "sources-postgresql_metrics")]
 mod postgresql_metrics;
 mod process;
 #[cfg(any(
-    feature = "sources-prometheus-scrape",
-    feature = "sources-prometheus-remote-write",
+    feature = "sources-prometheus_scrape",
+    feature = "sources-prometheus_remote_write",
     feature = "sinks-prometheus"
 ))]
 mod prometheus;
@@ -108,9 +123,11 @@ mod prometheus;
 mod pulsar;
 #[cfg(feature = "sources-redis")]
 mod redis;
-#[cfg(feature = "transforms-reduce")]
+#[cfg(feature = "transforms-impl-reduce")]
 mod reduce;
+#[cfg(feature = "transforms-remap")]
 mod remap;
+#[cfg(feature = "transforms-impl-sample")]
 mod sample;
 #[cfg(feature = "sinks-sematext")]
 mod sematext_metrics;
@@ -126,18 +143,22 @@ mod template;
 #[cfg(feature = "transforms-throttle")]
 mod throttle;
 mod udp;
+#[cfg(unix)]
 mod unix;
-#[cfg(feature = "sinks-websocket")]
+#[cfg(any(feature = "sources-websocket", feature = "sinks-websocket"))]
 mod websocket;
+#[cfg(feature = "sinks-websocket_server")]
+mod websocket_server;
+#[cfg(feature = "transforms-window")]
+mod window;
+#[cfg(all(windows, feature = "sources-windows_event_log"))]
+mod windows_event_log;
 
-#[cfg(any(
-    feature = "sources-file",
-    feature = "sources-kubernetes_logs",
-    feature = "sinks-file",
-))]
-mod file;
+#[cfg(windows)]
 mod windows;
 
+#[cfg(any(feature = "transforms-log_to_metric", feature = "sinks-loki"))]
+mod expansion;
 #[cfg(feature = "sources-mongodb_metrics")]
 pub(crate) use mongodb_metrics::*;
 
@@ -166,9 +187,10 @@ pub(crate) use self::aws_kinesis::*;
 pub(crate) use self::aws_kinesis_firehose::*;
 #[cfg(any(feature = "sources-aws_s3", feature = "sources-aws_sqs",))]
 pub(crate) use self::aws_sqs::*;
-pub(crate) use self::codecs::*;
 #[cfg(feature = "sources-datadog_agent")]
 pub(crate) use self::datadog_agent::*;
+#[cfg(feature = "sinks-datadog_logs")]
+pub(crate) use self::datadog_logs::*;
 #[cfg(feature = "sinks-datadog_metrics")]
 pub(crate) use self::datadog_metrics::*;
 #[cfg(feature = "sinks-datadog_traces")]
@@ -177,21 +199,32 @@ pub(crate) use self::datadog_traces::*;
 pub(crate) use self::dedupe::*;
 #[cfg(feature = "sources-demo_logs")]
 pub(crate) use self::demo_logs::*;
-#[cfg(feature = "sources-dnstap")]
+pub(crate) use self::disk_buffer::*;
+#[cfg(all(unix, feature = "sources-dnstap"))]
 pub(crate) use self::dnstap::*;
 #[cfg(feature = "sources-docker_logs")]
 pub(crate) use self::docker_logs::*;
+#[cfg(feature = "sinks-doris")]
+pub(crate) use self::doris::*;
 #[cfg(feature = "sources-eventstoredb_metrics")]
 pub(crate) use self::eventstoredb_metrics::*;
 #[cfg(feature = "sources-exec")]
 pub(crate) use self::exec::*;
+#[cfg(any(feature = "transforms-log_to_metric", feature = "sinks-loki"))]
+pub use self::expansion::*;
+#[cfg(any(
+    feature = "sources-file",
+    feature = "sources-kubernetes_logs",
+    feature = "sinks-file",
+))]
+pub use self::file::FileInternalMetricsConfig;
 #[cfg(any(
     feature = "sources-file",
     feature = "sources-kubernetes_logs",
     feature = "sinks-file",
 ))]
 pub(crate) use self::file::*;
-#[cfg(any(feature = "sources-file-descriptor", feature = "sources-stdin"))]
+#[cfg(any(feature = "sources-file_descriptor", feature = "sources-stdin"))]
 pub(crate) use self::file_descriptor::*;
 #[cfg(feature = "transforms-filter")]
 pub(crate) use self::filter::*;
@@ -209,8 +242,6 @@ pub(crate) use self::http_client_source::*;
 pub(crate) use self::influxdb::*;
 #[cfg(feature = "sources-internal_logs")]
 pub(crate) use self::internal_logs::*;
-#[cfg(feature = "sources-internal_metrics")]
-pub(crate) use self::internal_metrics::*;
 #[cfg(all(unix, feature = "sources-journald"))]
 pub(crate) use self::journald::*;
 #[cfg(any(feature = "sources-kafka", feature = "sinks-kafka"))]
@@ -227,17 +258,21 @@ pub(crate) use self::loki::*;
 pub(crate) use self::lua::*;
 #[cfg(feature = "transforms-metric_to_log")]
 pub(crate) use self::metric_to_log::*;
-#[cfg(feature = "sinks-mqtt")]
+#[cfg(any(feature = "sinks-mqtt", feature = "sources-mqtt"))]
 pub(crate) use self::mqtt::*;
 #[cfg(feature = "sources-nginx_metrics")]
 pub(crate) use self::nginx_metrics::*;
-#[allow(unused_imports)]
+#[cfg(any(
+    feature = "sources-kubernetes_logs",
+    feature = "transforms-log_to_metric",
+    feature = "sinks-datadog_events",
+))]
 pub(crate) use self::parser::*;
 #[cfg(feature = "sources-postgresql_metrics")]
 pub(crate) use self::postgresql_metrics::*;
 #[cfg(any(
-    feature = "sources-prometheus-scrape",
-    feature = "sources-prometheus-remote-write",
+    feature = "sources-prometheus_scrape",
+    feature = "sources-prometheus_remote_write",
     feature = "sinks-prometheus"
 ))]
 pub(crate) use self::prometheus::*;
@@ -245,7 +280,7 @@ pub(crate) use self::prometheus::*;
 pub(crate) use self::pulsar::*;
 #[cfg(feature = "sources-redis")]
 pub(crate) use self::redis::*;
-#[cfg(feature = "transforms-reduce")]
+#[cfg(feature = "transforms-impl-reduce")]
 pub(crate) use self::reduce::*;
 #[cfg(feature = "transforms-remap")]
 pub(crate) use self::remap::*;
@@ -263,10 +298,16 @@ pub(crate) use self::tag_cardinality_limit::*;
 pub(crate) use self::throttle::*;
 #[cfg(unix)]
 pub(crate) use self::unix::*;
-#[cfg(feature = "sinks-websocket")]
+#[cfg(any(feature = "sources-websocket", feature = "sinks-websocket"))]
 pub(crate) use self::websocket::*;
+#[cfg(feature = "sinks-websocket_server")]
+pub(crate) use self::websocket_server::*;
+#[cfg(feature = "transforms-window")]
+pub(crate) use self::window::*;
 #[cfg(windows)]
 pub(crate) use self::windows::*;
+#[cfg(all(windows, feature = "sources-windows_event_log"))]
+pub(crate) use self::windows_event_log::*;
 pub use self::{
     adaptive_concurrency::*, batch::*, common::*, conditions::*, encoding_transcode::*,
     heartbeat::*, http::*, open::*, process::*, socket::*, tcp::*, template::*, udp::*,

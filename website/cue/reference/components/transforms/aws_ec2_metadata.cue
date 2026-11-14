@@ -8,7 +8,6 @@ components: transforms: aws_ec2_metadata: {
 		"""
 
 	classes: {
-		commonly_used: false
 		development:   "stable"
 		egress_method: "stream"
 		stateful:      false
@@ -41,7 +40,6 @@ components: transforms: aws_ec2_metadata: {
 				```
 				""",
 		]
-		notices: []
 		warnings: [
 			"""
 				Do not enable this transform if you are running Vector as an Aggregator, tags will be sourced from the Aggregator node's metadata server and not the client's.
@@ -49,7 +47,7 @@ components: transforms: aws_ec2_metadata: {
 		]
 	}
 
-	configuration: base.components.transforms.aws_ec2_metadata.configuration
+	configuration: generated.components.transforms.aws_ec2_metadata.configuration
 
 	env_vars: {
 		http_proxy:  env_vars._http_proxy
@@ -79,7 +77,6 @@ components: transforms: aws_ec2_metadata: {
 			"account-id": {
 				description: "The `account-id` that launched the EC2 instance."
 				required:    false
-				common:      true
 				type: string: {
 					default: null
 					examples: ["123456789"]

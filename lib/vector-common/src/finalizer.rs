@@ -1,15 +1,28 @@
 #![allow(clippy::module_name_repetitions)]
 
-use std::marker::{PhantomData, Unpin};
-use std::{fmt::Debug, future::Future, pin::Pin, sync::Arc, task::Context, task::Poll};
+use std::{
+    fmt::Debug,
+    future::Future,
+    marker::{PhantomData, Unpin},
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
-use futures::stream::{BoxStream, FuturesOrdered, FuturesUnordered};
-use futures::{future::OptionFuture, FutureExt, Stream, StreamExt};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tokio::sync::Notify;
+use futures::{
+    FutureExt, Stream, StreamExt,
+    future::OptionFuture,
+    stream::{BoxStream, FuturesOrdered, FuturesUnordered},
+};
+use tokio::sync::{
+    Notify,
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+};
 
-use crate::finalization::{BatchStatus, BatchStatusReceiver};
-use crate::shutdown::ShutdownSignal;
+use crate::{
+    finalization::{BatchStatus, BatchStatusReceiver},
+    shutdown::ShutdownSignal,
+};
 
 /// The `OrderedFinalizer` framework produces a stream of acknowledged
 /// event batch identifiers from a source in a single background task
@@ -53,7 +66,6 @@ where
     /// shutdown signal is received. This is not recommended, and can cause some acknowledgements
     /// to go unprocessed. Sources may process the message(s) that correspond to those
     /// acknowledgements again.
-    #[must_use]
     pub fn new(shutdown: Option<ShutdownSignal>) -> (Self, BoxStream<'static, (BatchStatus, T)>) {
         let (todo_tx, todo_rx) = mpsc::unbounded_channel();
         let flush1 = Arc::new(Notify::new());
@@ -72,7 +84,6 @@ where
     /// stream of acknowledged identifiers. In the case the finalizer
     /// is not to be used, a special empty stream is returned that is
     /// always pending and so never wakes.
-    #[must_use]
     pub fn maybe_new(
         maybe: bool,
         shutdown: Option<ShutdownSignal>,
@@ -86,10 +97,10 @@ where
     }
 
     pub fn add(&self, entry: T, receiver: BatchStatusReceiver) {
-        if let Some(sender) = &self.sender {
-            if let Err(error) = sender.send((receiver, entry)) {
-                error!(message = "FinalizerSet task ended prematurely.", %error);
-            }
+        if let Some(sender) = &self.sender
+            && let Err(error) = sender.send((receiver, entry))
+        {
+            error!(message = "FinalizerSet task ended prematurely.", %error);
         }
     }
 

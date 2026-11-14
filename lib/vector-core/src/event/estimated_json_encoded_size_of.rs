@@ -5,7 +5,7 @@ use chrono::{DateTime, Timelike, Utc};
 use ordered_float::NotNan;
 use smallvec::SmallVec;
 use vector_common::json_size::JsonSize;
-use vrl::value::{KeyString, Value};
+use vrl::value::{KeyString, ObjectMap, Value};
 
 const NULL_SIZE: JsonSize = JsonSize::new(4);
 const TRUE_SIZE: JsonSize = JsonSize::new(4);
@@ -74,6 +74,7 @@ impl EstimatedJsonEncodedSizeOf for Value {
             Value::Object(v) => v.estimated_json_encoded_size_of(),
             Value::Array(v) => v.estimated_json_encoded_size_of(),
             Value::Bytes(v) => v.estimated_json_encoded_size_of(),
+            Value::String(v) => v.estimated_json_encoded_size_of(),
             Value::Regex(v) => v.as_str().estimated_json_encoded_size_of(),
             Value::Integer(v) => v.estimated_json_encoded_size_of(),
             Value::Float(v) => v.estimated_json_encoded_size_of(),
@@ -114,23 +115,19 @@ impl EstimatedJsonEncodedSizeOf for Bytes {
 
 impl EstimatedJsonEncodedSizeOf for bool {
     fn estimated_json_encoded_size_of(&self) -> JsonSize {
-        if *self {
-            TRUE_SIZE
-        } else {
-            FALSE_SIZE
-        }
+        if *self { TRUE_SIZE } else { FALSE_SIZE }
     }
 }
 
 impl EstimatedJsonEncodedSizeOf for f64 {
     fn estimated_json_encoded_size_of(&self) -> JsonSize {
-        ryu::Buffer::new().format_finite(*self).len().into()
+        zmij::Buffer::new().format_finite(*self).len().into()
     }
 }
 
 impl EstimatedJsonEncodedSizeOf for f32 {
     fn estimated_json_encoded_size_of(&self) -> JsonSize {
-        ryu::Buffer::new().format_finite(*self).len().into()
+        zmij::Buffer::new().format_finite(*self).len().into()
     }
 }
 
@@ -140,31 +137,39 @@ impl<T: EstimatedJsonEncodedSizeOf + Copy> EstimatedJsonEncodedSizeOf for NotNan
     }
 }
 
-/// JSON only support string keys, so `K` is constrained to anything that can be converted into a
+/// Estimates the JSON size of an object from its entries.
+///
+/// JSON only supports string keys, so `K` is constrained to anything that can be converted into a
 /// `str`.
+fn estimated_object_size<'a, K, V>(entries: impl Iterator<Item = (&'a K, &'a V)>) -> JsonSize
+where
+    K: AsRef<str> + 'a,
+    V: EstimatedJsonEncodedSizeOf + 'a,
+{
+    let size = entries.fold(BRACES_SIZE, |acc, (k, v)| {
+        acc + k.as_ref().estimated_json_encoded_size_of().get()
+            + COLON_SIZE
+            + v.estimated_json_encoded_size_of().get()
+            + COMMA_SIZE
+    });
+
+    JsonSize::new(if size > BRACES_SIZE {
+        size - COMMA_SIZE
+    } else {
+        size
+    })
+}
+
 impl<K, V> EstimatedJsonEncodedSizeOf for BTreeMap<K, V>
 where
     K: AsRef<str>,
     V: EstimatedJsonEncodedSizeOf,
 {
     fn estimated_json_encoded_size_of(&self) -> JsonSize {
-        let size = self.iter().fold(BRACES_SIZE, |acc, (k, v)| {
-            acc + k.as_ref().estimated_json_encoded_size_of().get()
-                + COLON_SIZE
-                + v.estimated_json_encoded_size_of().get()
-                + COMMA_SIZE
-        });
-
-        JsonSize::new(if size > BRACES_SIZE {
-            size - COMMA_SIZE
-        } else {
-            size
-        })
+        estimated_object_size(self.iter())
     }
 }
 
-/// JSON only support string keys, so `K` is constrained to anything that can be converted into a
-/// `str`.
 impl<K, V, S> EstimatedJsonEncodedSizeOf for HashMap<K, V, S>
 where
     K: AsRef<str>,
@@ -172,18 +177,13 @@ where
     S: ::std::hash::BuildHasher,
 {
     fn estimated_json_encoded_size_of(&self) -> JsonSize {
-        let size = self.iter().fold(BRACES_SIZE, |acc, (k, v)| {
-            acc + k.as_ref().estimated_json_encoded_size_of().get()
-                + COLON_SIZE
-                + v.estimated_json_encoded_size_of().get()
-                + COMMA_SIZE
-        });
+        estimated_object_size(self.iter())
+    }
+}
 
-        JsonSize::new(if size > BRACES_SIZE {
-            size - COMMA_SIZE
-        } else {
-            size
-        })
+impl EstimatedJsonEncodedSizeOf for ObjectMap {
+    fn estimated_json_encoded_size_of(&self) -> JsonSize {
+        estimated_object_size(self.iter())
     }
 }
 
@@ -216,9 +216,9 @@ impl EstimatedJsonEncodedSizeOf for DateTime<Utc> {
         let ns = self.nanosecond() % 1_000_000_000;
         let epoch = if ns == 0 {
             EPOCH_RFC3339_0
-        } else if ns % 1_000_000 == 0 {
+        } else if ns.is_multiple_of(1_000_000) {
             EPOCH_RFC3339_3
-        } else if ns % 1_000 == 0 {
+        } else if ns.is_multiple_of(1_000) {
             EPOCH_RFC3339_6
         } else {
             EPOCH_RFC3339_9
@@ -446,10 +446,11 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use super::*;
     use quickcheck::{Arbitrary, Gen, TestResult};
     use quickcheck_macros::quickcheck;
     use serde::Serialize;
+
+    use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
     struct ValidString(String);
@@ -640,6 +641,7 @@ mod tests {
     fn is_inaccurately_counted_value(v: &Value) -> bool {
         match v {
             Value::Bytes(v) => is_inaccurately_counted_bytes(v),
+            Value::String(v) => is_inaccurately_counted_bytes(v.as_bytes()),
             Value::Object(v) => v.iter().any(|(k, v)| {
                 is_inaccurately_counted_bytes(k.as_bytes()) || is_inaccurately_counted_value(v)
             }),

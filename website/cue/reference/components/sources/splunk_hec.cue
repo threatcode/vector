@@ -10,8 +10,7 @@ components: sources: splunk_hec: {
 		"""
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["aggregator"]
 		development:   "stable"
 		egress_method: "batch"
@@ -49,14 +48,13 @@ components: sources: splunk_hec: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.splunk_hec.configuration
+	configuration: generated.components.sources.splunk_hec.configuration
 
 	output: logs: event: {
 		description: "A single event"

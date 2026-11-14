@@ -1,15 +1,17 @@
 use std::fmt::Debug;
 
-use metrics::counter;
-use rumqttc::ConnectionError;
-use vector_lib::internal_event::InternalEvent;
-use vector_lib::internal_event::{error_stage, error_type};
+use vector_lib::{
+    NamedInternalEvent, counter,
+    internal_event::{CounterName, InternalEvent, error_stage, error_type},
+};
 
-#[derive(Debug)]
-pub struct MqttConnectionError {
-    pub error: ConnectionError,
+#[cfg(feature = "sinks-mqtt")]
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct MqttConnectionError {
+    pub error: rumqttc::ConnectionError,
 }
 
+#[cfg(feature = "sinks-mqtt")]
 impl InternalEvent for MqttConnectionError {
     fn emit(self) {
         error!(
@@ -18,17 +20,39 @@ impl InternalEvent for MqttConnectionError {
             error_code = "mqtt_connection_error",
             error_type = error_type::WRITER_FAILED,
             stage = error_stage::SENDING,
-            internal_log_rate_limit = true,
         );
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_code" => "mqtt_connection_error",
             "error_type" => error_type::WRITER_FAILED,
             "stage" => error_stage::SENDING,
-        );
+        )
+        .increment(1);
     }
+}
 
-    fn name(&self) -> Option<&'static str> {
-        Some("MqttConnectionError")
+#[cfg(feature = "sources-mqtt")]
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct MqttSubscribeError {
+    pub error: rumqttc::ClientError,
+}
+
+#[cfg(feature = "sources-mqtt")]
+impl InternalEvent for MqttSubscribeError {
+    fn emit(self) {
+        error!(
+            message = "MQTT subscribe error.",
+            error = %self.error,
+            error_code = "mqtt_subscribe_error",
+            error_type = error_type::REQUEST_FAILED,
+            stage = error_stage::RECEIVING,
+        );
+        counter!(
+            CounterName::ComponentErrorsTotal,
+            "error_code" => "mqtt_subscribe_error",
+            "error_type" => error_type::REQUEST_FAILED,
+            "stage" => error_stage::RECEIVING,
+        )
+        .increment(1);
     }
 }

@@ -1,0 +1,46 @@
+package metadata
+
+generated: components: sources: stdin: configuration: {
+	decoding: {
+		description: """
+			Configures how events are decoded from raw bytes. Note some decoders can also determine the event output
+			type (log, metric, trace).
+			"""
+		required: false
+		type:     _schemaDefinitions["derived::codecs::decoding::DeserializerConfig::185fc3d66caef78f8b28ff32"]
+	}
+	framing: {
+		description: """
+			Framing configuration.
+
+			Framing handles how events are separated when encoded in a raw byte form, where each event is
+			a frame that must be prefixed, or delimited, in a way that marks where an event begins and
+			ends within the byte stream.
+			"""
+		required: false
+		type:     _schemaDefinitions["codecs::decoding::FramingConfig"]
+	}
+	host_key: {
+		description: """
+			Overrides the name of the log field used to add the current hostname to each event.
+
+			By default, the [global `log_schema.host_key` option][global_host_key] is used.
+
+			[global_host_key]: https://vector.dev/docs/reference/configuration/global-options/#log_schema.host_key
+			"""
+		required: false
+		type: string: {}
+	}
+	max_length: {
+		description: """
+			The maximum buffer size, in bytes, of incoming messages.
+
+			Messages larger than this are truncated.
+			"""
+		required: false
+		type: uint: {
+			default: 102400
+			unit:    "bytes"
+		}
+	}
+}

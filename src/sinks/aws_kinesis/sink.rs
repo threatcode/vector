@@ -1,20 +1,20 @@
 use std::{borrow::Cow, fmt::Debug, marker::PhantomData};
+use vector_lib::internal_event::emit;
 
 use rand::random;
 use vector_lib::lookup::lookup_v2::ConfigValuePath;
 use vrl::path::PathPrefix;
 
+use super::{
+    record::Record,
+    request_builder::{KinesisRequest, KinesisRequestBuilder},
+};
 use crate::{
     internal_events::{AwsKinesisStreamNoPartitionKeyError, SinkRequestBuildError},
     sinks::{
         prelude::*,
-        util::{processed_event::ProcessedEvent, StreamSink},
+        util::{StreamSink, processed_event::ProcessedEvent},
     },
-};
-
-use super::{
-    record::Record,
-    request_builder::{KinesisRequest, KinesisRequestBuilder},
 };
 
 pub type KinesisProcessedEvent = ProcessedEvent<LogEvent, KinesisKey>;
@@ -59,27 +59,18 @@ where
             .filter_map(|request| async move {
                 match request {
                     Err(error) => {
-                        emit!(SinkRequestBuildError { error });
+                        emit(SinkRequestBuildError { error });
                         None
                     }
                     Ok(req) => Some(req),
                 }
             })
-            .batched_partitioned(
-                KinesisPartitioner {
-                    _phantom: PhantomData,
-                },
-                || batch_settings.as_byte_size_config(),
-            )
-            .map(|(key, events)| {
+            .batched(batch_settings.as_byte_size_config())
+            .map(|events| {
                 let metadata = RequestMetadata::from_batch(
                     events.iter().map(|req| req.get_metadata().clone()),
                 );
-                BatchKinesisRequest {
-                    key,
-                    events,
-                    metadata,
-                }
+                BatchKinesisRequest { events, metadata }
             })
             .into_driver(self.service)
             .run()
@@ -102,11 +93,11 @@ where
 }
 
 /// Returns a `KinesisProcessedEvent` containing the unmodified log event + metadata consisting of
-/// the partition key. The partition key is either generated from the provided partition_key_field
+/// the partition key. The partition key is either generated from the provided `partition_key_field`
 /// or is generated randomly.
 ///
-/// If the provided partition_key_field was not found in the log, `Error` `EventsDropped` internal
-/// events are emitted and None is returned.
+/// If the provided `partition_key_field` was not found in the log, `Error` `EventsDropped` internal
+/// events are emitted and `None` is returned.
 pub(crate) fn process_log(
     log: LogEvent,
     partition_key_field: Option<&ConfigValuePath>,
@@ -115,8 +106,8 @@ pub(crate) fn process_log(
         if let Some(v) = log.get((PathPrefix::Event, partition_key_field)) {
             v.to_string_lossy()
         } else {
-            emit!(AwsKinesisStreamNoPartitionKeyError {
-                partition_key_field: partition_key_field.0.to_string().as_str()
+            emit(AwsKinesisStreamNoPartitionKeyError {
+                partition_key_field: partition_key_field.0.to_string().as_str(),
             });
             return None;
         }
@@ -124,7 +115,12 @@ pub(crate) fn process_log(
         Cow::Owned(gen_partition_key())
     };
     let partition_key = if partition_key.len() >= 256 {
-        partition_key[..256].to_string()
+        #[expect(
+            clippy::string_slice,
+            reason = "floor_char_boundary guarantees a valid char boundary"
+        )]
+        let s = &partition_key[..partition_key.floor_char_boundary(256)];
+        s.to_string()
     } else {
         partition_key.into_owned()
     };
@@ -148,9 +144,8 @@ pub struct BatchKinesisRequest<R>
 where
     R: Record + Clone,
 {
-    pub key: KinesisKey,
     pub events: Vec<KinesisRequest<R>>,
-    metadata: RequestMetadata,
+    pub metadata: RequestMetadata,
 }
 
 impl<R> Clone for BatchKinesisRequest<R>
@@ -159,10 +154,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            key: KinesisKey {
-                partition_key: self.key.partition_key.clone(),
-            },
-            events: self.events.to_vec(),
+            events: self.events.clone(),
             metadata: self.metadata.clone(),
         }
     }
@@ -187,24 +179,5 @@ where
 
     fn metadata_mut(&mut self) -> &mut RequestMetadata {
         &mut self.metadata
-    }
-}
-
-struct KinesisPartitioner<R>
-where
-    R: Record,
-{
-    _phantom: PhantomData<R>,
-}
-
-impl<R> Partitioner for KinesisPartitioner<R>
-where
-    R: Record,
-{
-    type Item = KinesisRequest<R>;
-    type Key = KinesisKey;
-
-    fn partition(&self, item: &Self::Item) -> Self::Key {
-        item.key.clone()
     }
 }

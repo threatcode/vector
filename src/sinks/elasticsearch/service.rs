@@ -1,29 +1,33 @@
 use std::{
-    collections::HashMap,
     sync::Arc,
     task::{Context, Poll},
 };
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use http::{Response, Uri};
-use hyper::{service::Service, Body, Request};
-use tower::ServiceExt;
-use vector_lib::stream::DriverResponse;
-use vector_lib::ByteSizeOf;
+use http::{Request, Response, Uri};
+use http_body_util::BodyExt;
+use tower::{Service, service_fn};
+use tower_http::decompression::Decompression;
+use vector_http::full_body;
 use vector_lib::{
+    ByteSizeOf,
+    internal_event::emit,
     json_size::JsonSize,
     request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata},
+    stream::DriverResponse,
 };
 
 use super::{ElasticsearchCommon, ElasticsearchConfig};
 use crate::{
     event::{EventFinalizers, EventStatus, Finalizable},
     http::HttpClient,
-    sinks::util::{
-        auth::Auth,
-        http::{HttpBatchService, RequestConfig},
-        Compression, ElementCount,
+    internal_events::{EndpointBytesSent, SinkRequestBuildError},
+    sinks::{
+        elasticsearch::{encoder::ProcessedEvent, request_builder::ElasticsearchRequestBuilder},
+        util::{
+            Compression, ElementCount, auth::Auth, http::RequestConfig, uri::protocol_endpoint,
+        },
     },
 };
 
@@ -34,6 +38,8 @@ pub struct ElasticsearchRequest {
     pub batch_size: usize,
     pub events_byte_size: JsonSize,
     pub metadata: RequestMetadata,
+    pub original_events: Vec<ProcessedEvent>, //store original_events for reconstruct request when retrying
+    pub elasticsearch_request_builder: ElasticsearchRequestBuilder,
 }
 
 impl ByteSizeOf for ElasticsearchRequest {
@@ -64,37 +70,38 @@ impl MetaDescriptive for ElasticsearchRequest {
     }
 }
 
+/// Sends bulk requests through the shared native HTTP client.
+///
+/// Bulk requests may need asynchronous AWS signing with a service-specific payload hash, so
+/// this service builds requests itself instead of using the generic `http::HttpService`.
+/// It requests and decodes compressed responses.
 #[derive(Clone)]
 pub struct ElasticsearchService {
-    // TODO: `HttpBatchService` has been deprecated for direct use in sinks.
-    //       This sink should undergo a refactor to utilize the `HttpService`
-    //       instead, which extracts much of the boilerplate code for `Service`.
-    batch_service: HttpBatchService<
-        BoxFuture<'static, Result<http::Request<Bytes>, crate::Error>>,
-        ElasticsearchRequest,
-    >,
+    client: HttpClient,
+    http_request_builder: Arc<HttpRequestBuilder>,
+    protocol: Arc<str>,
+    endpoint: Arc<str>,
 }
 
 impl ElasticsearchService {
     pub fn new(
-        http_client: HttpClient<Body>,
+        http_client: HttpClient,
         http_request_builder: HttpRequestBuilder,
     ) -> ElasticsearchService {
-        let http_request_builder = Arc::new(http_request_builder);
-        let batch_service = HttpBatchService::new(http_client, move |req| {
-            let request_builder = Arc::clone(&http_request_builder);
-            let future: BoxFuture<'static, Result<http::Request<Bytes>, crate::Error>> =
-                Box::pin(async move { request_builder.build_request(req).await });
-            future
-        });
-        ElasticsearchService { batch_service }
+        let (protocol, endpoint) = protocol_endpoint(http_request_builder.bulk_uri.clone());
+        ElasticsearchService {
+            client: http_client,
+            http_request_builder: Arc::new(http_request_builder),
+            protocol: protocol.into(),
+            endpoint: endpoint.into(),
+        }
     }
 }
 
 pub struct HttpRequestBuilder {
     pub bulk_uri: Uri,
-    pub query_params: HashMap<String, String>,
     pub auth: Option<Auth>,
+    pub service_type: crate::sinks::elasticsearch::OpenSearchServiceType,
     pub compression: Compression,
     pub http_request_config: RequestConfig,
 }
@@ -103,18 +110,32 @@ impl HttpRequestBuilder {
     pub fn new(common: &ElasticsearchCommon, config: &ElasticsearchConfig) -> HttpRequestBuilder {
         HttpRequestBuilder {
             bulk_uri: common.bulk_uri.clone(),
-            http_request_config: config.request.clone(),
             auth: common.auth.clone(),
-            query_params: common.query_params.clone(),
+            service_type: common.service_type.clone(),
             compression: config.compression,
+            http_request_config: config.request.clone(),
         }
     }
 
+    /// Builds and authenticates a bulk request.
+    ///
+    /// # Errors
+    /// Returns an error if AWS credentials cannot be loaded or the request cannot be signed.
+    ///
+    /// # Panics
+    /// Panics if the configured URI or headers are invalid for an HTTP request.
+    #[cfg_attr(
+        not(feature = "aws-core"),
+        expect(
+            clippy::unused_async,
+            reason = "AWS request signing requires await when aws-core is enabled."
+        )
+    )]
     pub async fn build_request(
         &self,
         es_req: ElasticsearchRequest,
     ) -> Result<Request<Bytes>, crate::Error> {
-        let mut builder = Request::post(&self.bulk_uri);
+        let mut builder = Request::post(self.bulk_uri.clone());
 
         builder = builder.header("Content-Type", "application/x-ndjson");
 
@@ -127,7 +148,7 @@ impl HttpRequestBuilder {
         }
 
         for (header, value) in &self.http_request_config.headers {
-            builder = builder.header(&header[..], &value[..]);
+            builder = builder.header(header.as_str(), value.as_str());
         }
 
         let mut request = builder
@@ -145,9 +166,10 @@ impl HttpRequestBuilder {
                     region,
                 } => {
                     crate::sinks::elasticsearch::sign_request(
+                        &self.service_type,
                         &mut request,
                         provider,
-                        &Some(region.clone()),
+                        Some(region),
                     )
                     .await?;
                 }
@@ -161,7 +183,6 @@ impl HttpRequestBuilder {
 pub struct ElasticsearchResponse {
     pub http_response: Response<Bytes>,
     pub event_status: EventStatus,
-    pub batch_size: usize,
     pub events_byte_size: GroupedCountByteSize,
 }
 
@@ -187,19 +208,41 @@ impl Service<ElasticsearchRequest> for ElasticsearchService {
 
     // Emission of internal events for errors and dropped events is handled upstream by the caller.
     fn call(&mut self, mut req: ElasticsearchRequest) -> Self::Future {
-        let mut http_service = self.batch_service.clone();
+        let client = self.client.clone();
+        let http_request_builder = Arc::clone(&self.http_request_builder);
+        let protocol = Arc::clone(&self.protocol);
+        let endpoint = Arc::clone(&self.endpoint);
         Box::pin(async move {
-            http_service.ready().await?;
-            let batch_size = req.batch_size;
             let events_byte_size =
                 std::mem::take(req.metadata_mut()).into_events_estimated_json_encoded_byte_size();
-            let http_response = http_service.call(req).await?;
+            let request = http_request_builder
+                .build_request(req)
+                .await
+                .inspect_err(|error| {
+                    emit(SinkRequestBuildError { error });
+                })?;
+            let byte_size = request.body().len();
+
+            // Transport errors are emitted as `GotHttpWarning` by `HttpClient::send`; the driver
+            // counts the component error once retries are exhausted.
+            let mut service = Decompression::new(service_fn(|request| client.send(request)));
+            let response = service.call(request.map(full_body)).await?;
+
+            if response.status().is_success() {
+                emit(EndpointBytesSent {
+                    byte_size,
+                    protocol: &protocol,
+                    endpoint: &endpoint,
+                });
+            }
+
+            let (parts, body) = response.into_parts();
+            let http_response = Response::from_parts(parts, body.collect().await?.to_bytes());
 
             let event_status = get_event_status(&http_response);
             Ok(ElasticsearchResponse {
-                event_status,
                 http_response,
-                batch_size,
+                event_status,
                 events_byte_size,
             })
         })

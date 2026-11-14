@@ -1,14 +1,14 @@
 use std::{
-    future::Future,
     num::NonZeroUsize,
     panic,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use futures_util::{
-    stream::{Fuse, FuturesOrdered},
     Stream, StreamExt,
+    future::BoxFuture,
+    stream::{Fuse, FuturesOrdered},
 };
 use pin_project::pin_project;
 use tokio::task::JoinHandle;
@@ -23,7 +23,7 @@ where
     stream: Fuse<St>,
     limit: Option<NonZeroUsize>,
     in_flight: FuturesOrdered<JoinHandle<T>>,
-    f: Box<dyn Fn(St::Item) -> Pin<Box<dyn Future<Output = T> + Send + 'static>> + Send>,
+    f: Box<dyn Fn(St::Item) -> BoxFuture<'static, T> + Send>,
 }
 
 impl<St, T> ConcurrentMap<St, T>
@@ -33,7 +33,7 @@ where
 {
     pub fn new<F>(stream: St, limit: Option<NonZeroUsize>, f: F) -> Self
     where
-        F: Fn(St::Item) -> Pin<Box<dyn Future<Output = T> + Send + 'static>> + Send + 'static,
+        F: Fn(St::Item) -> BoxFuture<'static, T> + Send + 'static,
     {
         Self {
             stream: stream.fuse(),
@@ -72,6 +72,11 @@ where
                     Poll::Pending | Poll::Ready(None) => break,
                     Poll::Ready(Some(item)) => {
                         let fut = (this.f)(item);
+                        // `ConcurrentMap` does not instrument the spawned future itself: the
+                        // mapping closure runs on a detached task, so the current span at poll
+                        // time is not necessarily meaningful for the work being performed. It is
+                        // the caller's responsibility to propagate any span (e.g. the owning
+                        // component's span for internal metric/log tagging) into `fut`.
                         let handle = tokio::spawn(fut);
                         this.in_flight.push_back(handle);
                     }
@@ -83,7 +88,11 @@ where
         }
 
         match ready!(this.in_flight.poll_next_unpin(cx)) {
-            // Either nothing is in-flight, or nothing is ready.
+            // If the stream is done and there is no futures managed by FuturesOrdered,
+            // we must end the stream by returning Poll::Ready(None).
+            None if this.stream.is_done() => Poll::Ready(None),
+            // If there are no in-flight futures managed by FuturesOrdered but the underlying
+            // stream is not done, then we must keep polling that stream.
             None => Poll::Pending,
             Some(result) => match result {
                 Ok(item) => Poll::Ready(Some(item)),
@@ -91,13 +100,31 @@ where
                     if let Ok(reason) = e.try_into_panic() {
                         // Resume the panic here on the calling task.
                         panic::resume_unwind(reason);
-                    } else {
-                        // The task was cancelled, which makes no sense, because _we_ hold the join
-                        // handle. Only sensible thing to do is panic, because this is a bug.
-                        panic!("concurrent map task cancelled outside of our control");
                     }
+                    // The task was cancelled, which makes no sense, because _we_ hold the join
+                    // handle. Only sensible thing to do is panic, because this is a bug.
+                    panic!("concurrent map task cancelled outside of our control");
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::stream::StreamExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_concurrent_map_on_empty_stream() {
+        let stream = futures_util::stream::empty::<()>();
+        let limit = Some(NonZeroUsize::new(2).unwrap());
+        // The `as _` is required to construct a `dyn Future`
+        let f = |()| Box::pin(async move {}) as _;
+        let mut concurrent_map = ConcurrentMap::new(stream, limit, f);
+
+        // Assert that the stream does not hang
+        assert_eq!(concurrent_map.next().await, None);
     }
 }

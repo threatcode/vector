@@ -1,6 +1,10 @@
 use std::time::Duration;
 
-use metrics::{register_histogram, Histogram};
+use metrics::Histogram;
+use vector_lib::{
+    histogram,
+    internal_event::{HistogramName, LossyF64},
+};
 
 #[derive(Clone, Copy)]
 pub struct AdaptiveConcurrencyLimitData {
@@ -17,17 +21,17 @@ registered_event! {
         // These are histograms, as they may have a number of different
         // values over each reporting interval, and each of those values
         // is valuable for diagnosis.
-        limit: Histogram = register_histogram!("adaptive_concurrency_limit"),
-        reached_limit: Histogram = register_histogram!("adaptive_concurrency_reached_limit"),
-        back_pressure: Histogram = register_histogram!("adaptive_concurrency_back_pressure"),
-        past_rtt_mean: Histogram = register_histogram!("adaptive_concurrency_past_rtt_mean"),
+        limit: Histogram = histogram!(HistogramName::AdaptiveConcurrencyLimit),
+        reached_limit: Histogram = histogram!(HistogramName::AdaptiveConcurrencyReachedLimit),
+        back_pressure: Histogram = histogram!(HistogramName::AdaptiveConcurrencyBackPressure),
+        past_rtt_mean: Histogram = histogram!(HistogramName::AdaptiveConcurrencyPastRttMean),
     }
 
     fn emit(&self, data: AdaptiveConcurrencyLimitData) {
-        self.limit.record(data.concurrency as f64);
-        let reached_limit = data.reached_limit.then_some(1.0).unwrap_or_default();
+        self.limit.record(LossyF64(data.concurrency));
+        let reached_limit = if data.reached_limit { 1.0 } else { Default::default() };
         self.reached_limit.record(reached_limit);
-        let back_pressure = data.had_back_pressure.then_some(1.0).unwrap_or_default();
+        let back_pressure = if data.had_back_pressure { 1.0 } else { Default::default() };
         self.back_pressure.record(back_pressure);
         self.past_rtt_mean.record(data.past_rtt);
         // past_rtt_deviation is unrecorded
@@ -36,17 +40,17 @@ registered_event! {
 
 registered_event! {
     AdaptiveConcurrencyInFlight => {
-        in_flight: Histogram = register_histogram!("adaptive_concurrency_in_flight"),
+        in_flight: Histogram = histogram!(HistogramName::AdaptiveConcurrencyInFlight),
     }
 
     fn emit(&self, in_flight: u64) {
-        self.in_flight.record(in_flight as f64);
+        self.in_flight.record(LossyF64(in_flight));
     }
 }
 
 registered_event! {
     AdaptiveConcurrencyObservedRtt => {
-        observed_rtt: Histogram = register_histogram!("adaptive_concurrency_observed_rtt"),
+        observed_rtt: Histogram = histogram!(HistogramName::AdaptiveConcurrencyObservedRtt),
     }
 
     fn emit(&self, rtt: Duration) {
@@ -56,7 +60,7 @@ registered_event! {
 
 registered_event! {
     AdaptiveConcurrencyAveragedRtt => {
-        averaged_rtt: Histogram = register_histogram!("adaptive_concurrency_averaged_rtt"),
+        averaged_rtt: Histogram = histogram!(HistogramName::AdaptiveConcurrencyAveragedRtt),
     }
 
     fn emit(&self, rtt: Duration) {

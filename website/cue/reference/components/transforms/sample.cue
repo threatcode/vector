@@ -8,7 +8,6 @@ components: transforms: sample: {
 		"""
 
 	classes: {
-		commonly_used: false
 		development:   "stable"
 		egress_method: "stream"
 		stateful:      false
@@ -21,14 +20,22 @@ components: transforms: sample: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.transforms.sample.configuration
+	configuration: generated.components.transforms.sample.configuration
 
 	input: {
 		logs:    true
 		metrics: null
 		traces:  true
+	}
+
+	output: {
+		logs: "": {
+			description: "The modified input `log` event."
+		}
+		traces: "": {
+			description: "The modified input `trace` event."
+		}
 	}
 }

@@ -6,8 +6,7 @@ components: sources: statsd: {
 	title: "StatsD"
 
 	classes: {
-		commonly_used: false
-		delivery:      "best_effort"
+		delivery: "best_effort"
 		deployment_roles: ["aggregator"]
 		development:   "stable"
 		egress_method: "stream"
@@ -48,14 +47,13 @@ components: sources: statsd: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.statsd.configuration
+	configuration: generated.components.sources.statsd.configuration
 
 	output: metrics: {
 		counter:      output._passthrough_counter
@@ -68,8 +66,10 @@ components: sources: statsd: {
 		timings: {
 			title: "StatsD timings"
 			body: """
-				Incoming timings are emitted as distributions. Timings in milliseconds (`ms`) are
-				converted to seconds (`s`).
+				Incoming timings are emitted as distributions. By default, timings in milliseconds (`ms`)
+				are converted to seconds (`s`). This behavior can be controlled via the
+				`convert_to` configuration option. Setting `convert_to` to "milliseconds" will preserve
+				the original timing values.
 				"""
 		}
 		timestamps: {

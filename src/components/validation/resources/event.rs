@@ -3,18 +3,19 @@ use std::collections::HashMap;
 use bytes::BytesMut;
 use serde::Deserialize;
 use serde_json::Value;
-use snafu::Snafu;
 use tokio_util::codec::Encoder as _;
-
-use crate::codecs::Encoder;
-use vector_lib::codecs::{
-    encoding, JsonSerializer, LengthDelimitedEncoder, LogfmtSerializer, MetricTagValues,
-    NewlineDelimitedEncoder,
+use vector_lib::{
+    codecs::{
+        JsonSerializer, LengthDelimitedEncoder, LogfmtSerializer, MetricTagValues,
+        NewlineDelimitedEncoder, encoding, encoding::format::JsonSerializerOptions,
+    },
+    event::{Event, LogEvent},
 };
-use vector_lib::event::{Event, LogEvent};
+
+use vector_lib::codecs::Encoder;
 
 /// A test case event for deserialization from yaml file.
-/// This is an intermediary step to TestEvent.
+/// This is an intermediary step to `TestEvent`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 pub enum RawTestEvent {
@@ -57,7 +58,7 @@ impl EventData {
                 for (k, v) in data {
                     log_event
                         .parse_path_and_insert(&k, v)
-                        .unwrap_or_else(|_| panic!("Unable to build log event for {}", &k));
+                        .unwrap_or_else(|_| panic!("Unable to build log event for {k}"));
                 }
                 Event::Log(log_event)
             }
@@ -91,7 +92,9 @@ pub enum TestEvent {
 }
 
 impl TestEvent {
-    #[allow(clippy::missing_const_for_fn)] // const cannot run destructor
+    #[must_use]
+    // https://github.com/vectordotdev/vector/issues/23659
+    #[allow(clippy::match_same_arms, reason = "Preserve branch-specific context")]
     pub fn into_event(self) -> Event {
         match self {
             Self::Passthrough(event) => event,
@@ -100,7 +103,9 @@ impl TestEvent {
         }
     }
 
-    pub fn get_event(&mut self) -> &mut Event {
+    // https://github.com/vectordotdev/vector/issues/23659
+    #[allow(clippy::match_same_arms, reason = "Preserve branch-specific context")]
+    pub const fn get_event(&mut self) -> &mut Event {
         match self {
             Self::Passthrough(event) => event,
             Self::FailWithAlternateEncoder(event) => event,
@@ -108,7 +113,10 @@ impl TestEvent {
         }
     }
 
-    /// (should_fail, event)
+    /// (`should_fail`, event)
+    #[must_use]
+    // https://github.com/vectordotdev/vector/issues/23659
+    #[allow(clippy::match_same_arms, reason = "Preserve branch-specific context")]
     pub fn get(self) -> (bool, Event) {
         match self {
             Self::Passthrough(event) => (false, event),
@@ -118,6 +126,7 @@ impl TestEvent {
     }
 
     /// True if the event should fail, false otherwise.
+    #[must_use]
     pub const fn should_fail(&self) -> bool {
         match self {
             Self::Passthrough(_) => false,
@@ -127,6 +136,7 @@ impl TestEvent {
 
     /// True if the event should be rejected by the external resource in order to
     /// trigger a failure path.
+    #[must_use]
     pub const fn should_reject(&self) -> bool {
         match self {
             Self::Passthrough(_) | Self::FailWithAlternateEncoder(_) => false,
@@ -134,9 +144,6 @@ impl TestEvent {
         }
     }
 }
-
-#[derive(Clone, Debug, Eq, PartialEq, Snafu)]
-pub enum RawTestEventParseError {}
 
 impl From<RawTestEvent> for TestEvent {
     fn from(other: RawTestEvent) -> Self {
@@ -154,6 +161,11 @@ impl From<RawTestEvent> for TestEvent {
     }
 }
 
+/// Encodes a test event into `buf`, using an alternate encoder for events meant to fail decoding.
+///
+/// # Panics
+///
+/// Panics if the event cannot be encoded with the selected encoder.
 pub fn encode_test_event(
     encoder: &mut Encoder<encoding::Framer>,
     buf: &mut BytesMut,
@@ -174,12 +186,16 @@ pub fn encode_test_event(
             let mut alt_encoder = if encoder.serializer().supports_json() {
                 Encoder::<encoding::Framer>::new(
                     LengthDelimitedEncoder::default().into(),
-                    LogfmtSerializer::new().into(),
+                    LogfmtSerializer.into(),
                 )
             } else {
                 Encoder::<encoding::Framer>::new(
-                    NewlineDelimitedEncoder::new().into(),
-                    JsonSerializer::new(MetricTagValues::default()).into(),
+                    NewlineDelimitedEncoder::default().into(),
+                    JsonSerializer::new(
+                        MetricTagValues::default(),
+                        JsonSerializerOptions::default(),
+                    )
+                    .into(),
                 )
             };
 

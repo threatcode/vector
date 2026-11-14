@@ -40,14 +40,13 @@ components: sources: syslog: {
 
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.syslog.configuration
+	configuration: generated.components.sources.syslog.configuration
 
 	output: logs: line: {
 		description: "An individual Syslog event"
@@ -211,8 +210,6 @@ components: sources: syslog: {
 	}
 
 	telemetry: metrics: {
-		connection_read_errors_total: components.sources.internal_metrics.output.metrics.connection_read_errors_total
-		utf8_convert_errors_total:    components.sources.internal_metrics.output.metrics.utf8_convert_errors_total
-		component_received_bytes:     components.sources.internal_metrics.output.metrics.component_received_bytes
+		component_received_bytes: components.sources.internal_metrics.output.metrics.component_received_bytes
 	}
 }

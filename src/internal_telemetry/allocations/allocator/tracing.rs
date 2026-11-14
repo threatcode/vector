@@ -1,7 +1,7 @@
 use std::{any::TypeId, marker::PhantomData, ptr::addr_of};
 
 use tracing::{Dispatch, Id, Subscriber};
-use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
+use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 use super::AllocationGroupToken;
 
@@ -15,7 +15,7 @@ pub(crate) struct WithAllocationGroup {
 /// More information on using this layer can be found in the examples, or directly in the
 /// `tracing_subscriber` docs, found [here][tracing_subscriber::layer].
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing-compat")))]
-pub struct AllocationLayer<S> {
+pub(crate) struct AllocationLayer<S> {
     ctx: WithAllocationGroup,
     _subscriber: PhantomData<S>,
 }
@@ -26,7 +26,7 @@ where
 {
     /// Creates a new [`AllocationLayer`].
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let ctx = WithAllocationGroup {
             with_allocation_group: Self::with_allocation_group,
         };
@@ -54,18 +54,18 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
-        if let Some(span_ref) = ctx.span(id) {
-            if let Some(token) = span_ref.extensions().get::<AllocationGroupToken>() {
-                token.enter();
-            }
+        if let Some(span_ref) = ctx.span(id)
+            && let Some(token) = span_ref.extensions().get::<AllocationGroupToken>()
+        {
+            token.enter();
         }
     }
 
     fn on_exit(&self, id: &Id, ctx: Context<'_, S>) {
-        if let Some(span_ref) = ctx.span(id) {
-            if let Some(token) = span_ref.extensions().get::<AllocationGroupToken>() {
-                token.exit();
-            }
+        if let Some(span_ref) = ctx.span(id)
+            && let Some(token) = span_ref.extensions().get::<AllocationGroupToken>()
+        {
+            token.exit();
         }
     }
 

@@ -4,7 +4,6 @@ components: sinks: gcp_chronicle_unstructured: {
 	title: "GCP Chronicle Unstructured"
 
 	classes: {
-		commonly_used: true
 		delivery:      "at_least_once"
 		development:   "beta"
 		egress_method: "batch"
@@ -19,7 +18,6 @@ components: sinks: gcp_chronicle_unstructured: {
 		send: {
 			batch: {
 				enabled:      true
-				common:       false
 				max_bytes:    10_000_000
 				timeout_secs: 300.0
 			}
@@ -66,10 +64,9 @@ components: sinks: gcp_chronicle_unstructured: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.sinks.gcp_chronicle_unstructured.configuration
+	configuration: generated.components.sinks.gcp_chronicle_unstructured.configuration
 
 	input: {
 		logs:    true
@@ -77,6 +74,5 @@ components: sinks: gcp_chronicle_unstructured: {
 		traces:  false
 	}
 
-	how_it_works: {
-	}
+	how_it_works: {}
 }

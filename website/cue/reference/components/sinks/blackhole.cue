@@ -4,7 +4,6 @@ components: sinks: blackhole: {
 	title: "Blackhole"
 
 	classes: {
-		commonly_used: false
 		delivery:      "at_least_once"
 		development:   "stable"
 		egress_method: "stream"
@@ -27,10 +26,9 @@ components: sinks: blackhole: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.sinks.blackhole.configuration
+	configuration: generated.components.sinks.blackhole.configuration
 
 	input: {
 		logs: true

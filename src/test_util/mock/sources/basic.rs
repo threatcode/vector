@@ -1,21 +1,28 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+use std::{
+    num::NonZeroUsize,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
-use vector_lib::buffers::topology::channel::{limited, LimitedReceiver};
-use vector_lib::configurable::configurable_component;
-use vector_lib::{config::LogNamespace, schema::Definition};
 use vector_lib::{
-    config::{DataType, SourceOutput},
+    buffers::{
+        config::MemoryBufferSize,
+        topology::channel::{LimitedReceiver, limited},
+    },
+    config::{DataType, LogNamespace, SourceOutput},
+    configurable::configurable_component,
     event::EventContainer,
+    schema::Definition,
     source::Source,
+    source_sender::SourceSenderItem,
 };
 
 use crate::{
     config::{SourceConfig, SourceContext},
-    source_sender::SourceSenderItem,
+    test_util::mock::TestComponentData,
 };
 
 /// Configuration for the `test_basic` source.
@@ -37,17 +44,23 @@ pub struct BasicSourceConfig {
 
     /// Meaningless field that only exists for triggering config diffs during topology reloading.
     data: Option<String>,
+
+    /// Extra data retained for configuration-loading assertions.
+    #[serde(default, skip_serializing_if = "vector_lib::serde::is_default")]
+    pub extra: TestComponentData,
 }
 
 impl Default for BasicSourceConfig {
     fn default() -> Self {
-        let (_, receiver) = limited(1000);
+        let limit = MemoryBufferSize::MaxEvents(NonZeroUsize::new(1000).unwrap());
+        let (_, receiver) = limited(limit, None, None);
         Self {
             receiver: Arc::new(Mutex::new(Some(receiver))),
             event_counter: None,
-            data_type: Some(DataType::all()),
+            data_type: Some(DataType::all_bits()),
             force_shutdown: false,
             data: None,
+            extra: TestComponentData::DEFAULT,
         }
     }
 }
@@ -55,23 +68,27 @@ impl Default for BasicSourceConfig {
 impl_generate_config_from_default!(BasicSourceConfig);
 
 impl BasicSourceConfig {
+    #[must_use]
     pub fn new(receiver: LimitedReceiver<SourceSenderItem>) -> Self {
         Self {
             receiver: Arc::new(Mutex::new(Some(receiver))),
             event_counter: None,
-            data_type: Some(DataType::all()),
+            data_type: Some(DataType::all_bits()),
             force_shutdown: false,
             data: None,
+            extra: TestComponentData::DEFAULT,
         }
     }
 
+    #[must_use]
     pub fn new_with_data(receiver: LimitedReceiver<SourceSenderItem>, data: &str) -> Self {
         Self {
             receiver: Arc::new(Mutex::new(Some(receiver))),
             event_counter: None,
-            data_type: Some(DataType::all()),
+            data_type: Some(DataType::all_bits()),
             force_shutdown: false,
             data: Some(data.into()),
+            extra: TestComponentData::DEFAULT,
         }
     }
 
@@ -82,9 +99,10 @@ impl BasicSourceConfig {
         Self {
             receiver: Arc::new(Mutex::new(Some(receiver))),
             event_counter: Some(event_counter),
-            data_type: Some(DataType::all()),
+            data_type: Some(DataType::all_bits()),
             force_shutdown: false,
             data: None,
+            extra: TestComponentData::DEFAULT,
         }
     }
 
@@ -122,7 +140,7 @@ impl SourceConfig for BasicSourceConfig {
 
                         if let Err(e) = out.send_event(array).await {
                             error!(message = "Error sending in sink..", %e);
-                            return Err(())
+                            return Err(e.into())
                         }
                     },
 
@@ -136,7 +154,7 @@ impl SourceConfig for BasicSourceConfig {
     }
 
     fn outputs(&self, _global_log_namespace: LogNamespace) -> Vec<SourceOutput> {
-        vec![SourceOutput::new_logs(
+        vec![SourceOutput::new_maybe_logs(
             self.data_type.unwrap(),
             Definition::default_legacy_namespace(),
         )]

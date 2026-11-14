@@ -9,11 +9,8 @@ components: sources: heroku_logs: {
 		Receives log data from Heroku log drains via Heroku's logplex system.
 		"""
 
-	alias: "logplex"
-
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["aggregator"]
 		development:   "stable"
 		egress_method: "batch"
@@ -22,6 +19,7 @@ components: sources: heroku_logs: {
 
 	features: {
 		auto_generated:   true
+		has_auth:         true
 		acknowledgements: true
 		multiline: enabled: false
 		codecs: {
@@ -55,14 +53,13 @@ components: sources: heroku_logs: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.heroku_logs.configuration
+	configuration: generated.components.sources.heroku_logs.configuration
 
 	output: logs: line: {
 		description: "An individual event from a batch of events received through an HTTP POST request."

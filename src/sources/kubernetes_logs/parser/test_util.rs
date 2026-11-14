@@ -1,11 +1,12 @@
 #![cfg(test)]
-use similar_asserts::assert_eq;
-
 use chrono::{DateTime, Utc};
-use vector_lib::lookup::{event_path, metadata_path};
-use vector_lib::{config::LogNamespace, event};
-use vrl::value;
-use vrl::value::Value;
+use similar_asserts::assert_eq;
+use vector_lib::{
+    config::LogNamespace,
+    event,
+    lookup::{event_path, metadata_path},
+};
+use vrl::{value, value::Value};
 
 use crate::{
     event::{Event, LogEvent},
@@ -17,7 +18,7 @@ use crate::{
 ///
 /// The implementation is shared, and therefore consistent across all
 /// the parsers.
-pub fn make_log_event(
+pub(super) fn make_log_event(
     message: Value,
     timestamp: &str,
     stream: &str,
@@ -59,7 +60,7 @@ pub fn make_log_event(
 /// Shared logic for testing parsers.
 ///
 /// Takes a parser builder and a list of test cases.
-pub fn test_parser<B, L, S, F>(builder: B, loader: L, cases: Vec<(S, Vec<Event>)>)
+pub(super) fn test_parser<B, L, S, F>(builder: B, loader: L, cases: Vec<(S, Vec<Event>)>)
 where
     B: Fn() -> F,
     F: FunctionTransform,

@@ -1,55 +1,19 @@
 use std::{io, sync::Arc};
 
 use bytes::Bytes;
-use vector_lib::codecs::JsonSerializerConfig;
-use vector_lib::lookup::lookup_v2::ConfigValuePath;
-use vector_lib::request_metadata::{MetaDescriptive, RequestMetadata};
-use vector_lib::ByteSizeOf;
+use vector_lib::{
+    codecs::JsonSerializerConfig, lookup::lookup_v2::ConfigValuePath,
+    request_metadata::RequestMetadata,
+};
 
 use crate::{
     codecs::{Encoder, TimestampFormat, Transformer},
     event::{Event, EventFinalizers, Finalizable},
     sinks::util::{
-        metadata::RequestMetadataBuilder, request_builder::EncodeResult, Compression, ElementCount,
-        RequestBuilder,
+        Compression, RequestBuilder, http::HttpRequest, metadata::RequestMetadataBuilder,
+        request_builder::EncodeResult,
     },
 };
-
-#[derive(Clone)]
-pub struct DatadogEventsRequest {
-    pub body: Bytes,
-    pub metadata: Metadata,
-    request_metadata: RequestMetadata,
-}
-
-impl Finalizable for DatadogEventsRequest {
-    fn take_finalizers(&mut self) -> EventFinalizers {
-        std::mem::take(&mut self.metadata.finalizers)
-    }
-}
-
-impl ByteSizeOf for DatadogEventsRequest {
-    fn allocated_bytes(&self) -> usize {
-        self.body.allocated_bytes() + self.metadata.finalizers.allocated_bytes()
-    }
-}
-
-impl ElementCount for DatadogEventsRequest {
-    fn element_count(&self) -> usize {
-        // Datadog Events api only accepts a single event per request
-        1
-    }
-}
-
-impl MetaDescriptive for DatadogEventsRequest {
-    fn get_metadata(&self) -> &RequestMetadata {
-        &self.request_metadata
-    }
-
-    fn metadata_mut(&mut self) -> &mut RequestMetadata {
-        &mut self.request_metadata
-    }
-}
 
 #[derive(Clone)]
 pub struct Metadata {
@@ -68,6 +32,7 @@ impl Default for DatadogEventsRequestBuilder {
 }
 
 impl DatadogEventsRequestBuilder {
+    #[must_use]
     pub fn new() -> DatadogEventsRequestBuilder {
         DatadogEventsRequestBuilder { encoder: encoder() }
     }
@@ -78,7 +43,7 @@ impl RequestBuilder<Event> for DatadogEventsRequestBuilder {
     type Events = Event;
     type Encoder = (Transformer, Encoder<()>);
     type Payload = Bytes;
-    type Request = DatadogEventsRequest;
+    type Request = HttpRequest<Option<Arc<str>>>;
     type Error = io::Error;
 
     fn compression(&self) -> Compression {
@@ -107,11 +72,12 @@ impl RequestBuilder<Event> for DatadogEventsRequestBuilder {
         request_metadata: RequestMetadata,
         payload: EncodeResult<Self::Payload>,
     ) -> Self::Request {
-        DatadogEventsRequest {
-            body: payload.into_payload(),
-            metadata,
+        HttpRequest::new(
+            payload.into_payload(),
+            metadata.finalizers,
             request_metadata,
-        }
+            metadata.api_key,
+        )
     }
 }
 

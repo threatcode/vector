@@ -5,13 +5,13 @@ mod model;
 mod service;
 mod sink;
 
-pub use config::*;
-pub use encoding::*;
-pub use model::*;
-pub use service::*;
-pub use sink::*;
+use config::{NewRelicApi, NewRelicCredentials};
+use encoding::NewRelicEncoder;
+use model::{EventsApiModel, LogsApiModel, MetricsApiModel, NewRelicApiModel};
+use service::{NewRelicApiRequest, NewRelicApiResponse, NewRelicApiService};
+use sink::{NewRelicSink, NewRelicSinkError};
 
-pub use super::{Healthcheck, VectorSink};
+use super::{Healthcheck, VectorSink};
 
 #[cfg(test)]
-pub mod tests;
+mod tests;

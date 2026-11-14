@@ -1,8 +1,9 @@
 ---
+date: "2021-12-06"
 title: Enrich your observability data
 short: Enrichment
 description: Learn how to use CSV enrichment to provide more context to your data
-author_github: https://github.com/barieom
+authors: ["barieom"]
 domain: enriching
 weight: 5
 tags: ["enrichment", "logs", "level up", "guides", "guide"]
@@ -14,7 +15,7 @@ Before you begin, this guide assumes the following:
 * You understand the [basic Vector concepts][concepts]
 * You understand [how to set up a basic pipeline][pipeline]
 
-[concepts]: /docs/about/concepts
+[concepts]: /docs/introduction/concepts
 [pipeline]: /docs/setup/quickstart
 {{< /requirement >}}
 
@@ -39,7 +40,7 @@ emitted by the devices, even when collecting events from those devices. This
 is where [Enrichment tables] comes in very handy. Let's assume that you have an
 IoT device that emits its status - `online`, `offline`, `transmitting`, and
 `error` states, but the device needs to emit as little payload as possible
-due to technical constraints or requirements; instead, the IoT can device can
+due to technical constraints or requirements; instead, the IoT device can
 emit integers — `1` for `online`, `2` for `offline`, etc.
 
 To enrich the IoT device's observability data, let's use a `csv` file
@@ -84,7 +85,7 @@ To do so, we can make use of the [`get_enrichment_table_record`][get_enrichment_
 type = "remap"
 inputs = ["datadog_agents"]
 source = '''
-. = parse_json!(.status_message)
+. = parse_json!(.message)
 
 status_code = del(.status_code)
 
@@ -148,10 +149,10 @@ that case, you can set your `csv` file, let's call it  similarly to below:
 
 ``` csv
 ip,alert_type,severity
-"192.0.2.0", "alert", "high"
-"198.51.100.0", "alert", "medium"
+"192.0.2.0","alert","high"
+"198.51.100.0","alert","medium"
 ...
-"203.0.113.0", "warn", "medium"
+"203.0.113.0","warn","medium"
 ```
 
 Assuming you set the `enrichment_tables` similarly to the configuration in Use
@@ -182,7 +183,7 @@ Your observability data, assuming it was in JSON, now has been transformed from:
   "host":"my.host.com",
   "timestamp":"2019-11-01T21:15:47+00:00",
   ...
-  "ip":"192.0.2.0",
+  "ip":"192.0.2.0"
 }
 ```
 
@@ -195,7 +196,7 @@ To:
   ...
   "alert": {
     "type":"alert",
-    "severity":"medium"
+    "severity":"high"
   }
 }
 ```

@@ -4,10 +4,9 @@ components: sources: pulsar: {
 	title: "Apache Pulsar"
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["aggregator"]
-		development:   "beta"
+		development:   "stable"
 		egress_method: "stream"
 		stateful:      false
 	}
@@ -26,7 +25,6 @@ components: sources: pulsar: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
@@ -35,14 +33,12 @@ components: sources: pulsar: {
 
 	configuration: {
 		auth: {
-			common:      false
 			description: "Options for the authentication strategy."
 			required:    false
 			type: object: {
 				examples: []
 				options: {
 					name: {
-						common:      false
 						description: "The basic authentication name."
 						required:    false
 						type: string: {
@@ -51,7 +47,6 @@ components: sources: pulsar: {
 						}
 					}
 					token: {
-						common:      false
 						description: "The basic authentication password."
 						required:    false
 						type: string: {
@@ -60,7 +55,6 @@ components: sources: pulsar: {
 						}
 					}
 					oauth2: {
-						common:      false
 						description: "Options for OAuth2 authentication."
 						required:    false
 						type: object: {
@@ -81,7 +75,6 @@ components: sources: pulsar: {
 									}
 								}
 								audience: {
-									common:      false
 									description: "OAuth2 audience."
 									required:    false
 									type: string: {
@@ -90,7 +83,6 @@ components: sources: pulsar: {
 									}
 								}
 								scope: {
-									common:      false
 									description: "OAuth2 scope."
 									required:    false
 									type: string: {
@@ -114,49 +106,59 @@ components: sources: pulsar: {
 		topics: {
 			description: "The Pulsar topic names to read events from."
 			required:    true
-			type: string: {
-				examples: ["topic-1234"]
+			type: array: {
+				items: type: string: {
+					examples: ["topic-1234"]
+				}
 			}
 		}
 	}
 
-	output: logs: record: {
-		description: "An individual Pulsar record"
-		fields: {
-			message: {
-				description: "The raw line from the Kafka record."
-				required:    true
-				type: string: {
-					examples: ["53.126.150.246 - - [01/Oct/2020:11:25:58 -0400] \"GET /disintermediate HTTP/2.0\" 401 20308"]
+	output: {
+		logs: record: {
+			description: "An individual Pulsar record"
+			fields: {
+				message: {
+					description: "The raw line from the Kafka record."
+					required:    true
+					type: string: {
+						examples: ["53.126.150.246 - - [01/Oct/2020:11:25:58 -0400] \"GET /disintermediate HTTP/2.0\" 401 20308"]
+					}
+				}
+				source_type: {
+					description: "The name of the source type."
+					required:    true
+					type: string: {
+						examples: ["pulsar"]
+					}
+				}
+				timestamp: fields._current_timestamp & {
+					description: "The current time if it cannot be fetched."
+				}
+				publish_time: fields._current_timestamp & {
+					description: "The timestamp encoded in the Pulsar message."
+				}
+				topic: {
+					description: "The Pulsar topic that the record came from."
+					required:    true
+					type: string: {
+						examples: ["topic"]
+					}
+				}
+				producer_name: {
+					description: "The Pulsar producer's name which the record came from."
+					required:    true
+					type: string: {
+						examples: ["pulsar-client"]
+					}
 				}
 			}
-			source_type: {
-				description: "The name of the source type."
-				required:    true
-				type: string: {
-					examples: ["pulsar"]
-				}
-			}
-			timestamp: fields._current_timestamp & {
-				description: "The current time if it cannot be fetched."
-			}
-			publish_time: fields._current_timestamp & {
-				description: "The timestamp encoded in the Pulsar message."
-			}
-			topic: {
-				description: "The Pulsar topic that the record came from."
-				required:    true
-				type: string: {
-					examples: ["topic"]
-				}
-			}
-			producer_name: {
-				description: "The Pulsar producer's name which the record came from."
-				required:    true
-				type: string: {
-					examples: ["pulsar-client"]
-				}
-			}
+		}
+		metrics: "": {
+			description: "Metric events that may be emitted by this source."
+		}
+		traces: "": {
+			description: "Trace events that may be emitted by this source."
 		}
 	}
 

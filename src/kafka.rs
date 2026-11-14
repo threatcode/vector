@@ -1,14 +1,16 @@
 #![allow(missing_docs)]
 use std::path::{Path, PathBuf};
 
-use rdkafka::{consumer::ConsumerContext, ClientConfig, ClientContext, Statistics};
+use rdkafka::{ClientConfig, ClientContext, Statistics, consumer::ConsumerContext};
 use snafu::Snafu;
 use tracing::Span;
-use vector_lib::configurable::configurable_component;
-use vector_lib::sensitive_string::SensitiveString;
+use vector_lib::{
+    configurable::configurable_component, internal_event::emit, sensitive_string::SensitiveString,
+};
 
 use crate::{
-    internal_events::KafkaStatisticsReceived, tls::TlsEnableableConfig, tls::PEM_START_MARKER,
+    internal_events::KafkaStatisticsReceived,
+    tls::{PEM_START_MARKER, TlsEnableableConfig},
 };
 
 #[derive(Debug, Snafu)]
@@ -19,12 +21,11 @@ enum KafkaError {
 
 /// Supported compression types for Kafka.
 #[configurable_component]
-#[derive(Clone, Copy, Debug, Derivative)]
-#[derivative(Default)]
+#[derive(Clone, Copy, Debug, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum KafkaCompression {
     /// No compression.
-    #[derivative(Default)]
+    #[default]
     None,
 
     /// Gzip.
@@ -44,11 +45,8 @@ pub enum KafkaCompression {
 #[configurable_component]
 #[derive(Clone, Debug, Default)]
 pub struct KafkaAuthConfig {
-    #[configurable(derived)]
     pub(crate) sasl: Option<KafkaSaslConfig>,
 
-    #[configurable(derived)]
-    #[configurable(metadata(docs::advanced))]
     pub(crate) tls: Option<TlsEnableableConfig>,
 }
 
@@ -115,7 +113,7 @@ impl KafkaAuthConfig {
             if let Some(verify_certificate) = &tls.options.verify_certificate {
                 client.set(
                     "enable.ssl.certificate.verification",
-                    &verify_certificate.to_string(),
+                    verify_certificate.to_string(),
                 );
             }
 
@@ -169,7 +167,7 @@ fn pathbuf_to_string(path: &Path) -> crate::Result<&str> {
 
 pub(crate) struct KafkaStatisticsContext {
     pub(crate) expose_lag_metrics: bool,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 impl ClientContext for KafkaStatisticsContext {
@@ -177,7 +175,7 @@ impl ClientContext for KafkaStatisticsContext {
         // This callback get executed on a separate thread within the rdkafka library, so we need
         // to propagate the span here to attach the component tags to the emitted events.
         let _entered = self.span.enter();
-        emit!(KafkaStatisticsReceived {
+        emit(KafkaStatisticsReceived {
             statistics: &statistics,
             expose_lag_metrics: self.expose_lag_metrics,
         });

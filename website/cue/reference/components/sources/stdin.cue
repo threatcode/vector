@@ -4,8 +4,7 @@ components: sources: stdin: {
 	title: "STDIN"
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["sidecar"]
 		development:   "stable"
 		egress_method: "stream"
@@ -33,28 +32,35 @@ components: sources: stdin: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.stdin.configuration
+	configuration: generated.components.sources.stdin.configuration
 
-	output: logs: line: {
-		description: "An individual event from STDIN."
-		fields: {
-			host:      fields._local_host
-			message:   fields._raw_line
-			timestamp: fields._current_timestamp
-			source_type: {
-				description: "The name of the source type."
-				required:    true
-				type: string: {
-					examples: ["stdin"]
+	output: {
+		logs: line: {
+			description: "An individual event from STDIN."
+			fields: {
+				host:      fields._local_host
+				message:   fields._raw_line
+				timestamp: fields._current_timestamp
+				source_type: {
+					description: "The name of the source type."
+					required:    true
+					type: string: {
+						examples: ["stdin"]
+					}
 				}
 			}
+		}
+		metrics: "": {
+			description: "Metric events that may be emitted by this source."
+		}
+		traces: "": {
+			description: "Trace events that may be emitted by this source."
 		}
 	}
 
@@ -84,7 +90,5 @@ components: sources: stdin: {
 		}
 	}
 
-	telemetry: metrics: {
-		stdin_reads_failed_total: components.sources.internal_metrics.output.metrics.stdin_reads_failed_total
-	}
+	telemetry: metrics: {}
 }

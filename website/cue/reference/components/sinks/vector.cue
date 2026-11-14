@@ -10,7 +10,6 @@ components: sinks: vector: {
 		"""
 
 	classes: {
-		commonly_used: false
 		delivery:      "best_effort"
 		development:   "stable"
 		egress_method: "batch"
@@ -24,12 +23,12 @@ components: sinks: vector: {
 		send: {
 			batch: {
 				enabled:      true
-				common:       false
 				max_bytes:    10_000_000
 				timeout_secs: 1.0
 			}
 			compression: enabled: false
 			encoding: enabled:    false
+			proxy: enabled:       true
 			request: {
 				enabled: true
 				headers: false
@@ -59,7 +58,6 @@ components: sinks: vector: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	input: {
@@ -75,11 +73,9 @@ components: sinks: vector: {
 		traces: true
 	}
 
-	configuration: base.components.sinks.vector.configuration
+	configuration: generated.components.sinks.vector.configuration
 
 	how_it_works: components.sinks.vector.how_it_works
 
-	telemetry: metrics: {
-		protobuf_decode_errors_total: components.sources.internal_metrics.output.metrics.protobuf_decode_errors_total
-	}
+	telemetry: metrics: {}
 }

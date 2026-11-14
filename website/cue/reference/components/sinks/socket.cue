@@ -4,7 +4,6 @@ components: sinks: socket: {
 	title: "Socket"
 
 	classes: {
-		commonly_used: true
 		delivery:      "best_effort"
 		development:   "stable"
 		egress_method: "stream"
@@ -56,14 +55,20 @@ components: sinks: socket: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.sinks.socket.configuration
+	configuration: generated.components.sinks.socket.configuration
 
 	input: {
-		logs:    true
-		metrics: null
-		traces:  false
+		logs: true
+		metrics: {
+			counter:      true
+			distribution: true
+			gauge:        true
+			histogram:    true
+			set:          true
+			summary:      true
+		}
+		traces: true
 	}
 }

@@ -1,7 +1,7 @@
 use std::{
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -14,16 +14,17 @@ use rdkafka::{
     producer::{FutureProducer, FutureRecord},
     types::RDKafkaErrorCode,
 };
+use vector_lib::config;
 
 use crate::{kafka::KafkaStatisticsContext, sinks::prelude::*};
 
-pub struct KafkaRequest {
+pub(crate) struct KafkaRequest {
     pub body: Bytes,
     pub metadata: KafkaRequestMetadata,
     pub request_metadata: RequestMetadata,
 }
 
-pub struct KafkaRequestMetadata {
+pub(crate) struct KafkaRequestMetadata {
     pub finalizers: EventFinalizers,
     pub key: Option<Bytes>,
     pub timestamp_millis: Option<i64>,
@@ -31,14 +32,15 @@ pub struct KafkaRequestMetadata {
     pub topic: String,
 }
 
-pub struct KafkaResponse {
+pub(crate) struct KafkaResponse {
     event_byte_size: GroupedCountByteSize,
     raw_byte_size: usize,
+    event_status: EventStatus,
 }
 
 impl DriverResponse for KafkaResponse {
     fn event_status(&self) -> EventStatus {
-        EventStatus::Delivered
+        self.event_status
     }
 
     fn events_sent(&self) -> &GroupedCountByteSize {
@@ -66,7 +68,7 @@ impl MetaDescriptive for KafkaRequest {
     }
 }
 
-/// BlockedRecordState manages state for a record blocked from being enqueued on the producer.
+/// `BlockedRecordState` manages state for a record blocked from being enqueued on the producer.
 struct BlockedRecordState {
     records_blocked: Arc<AtomicUsize>,
 }
@@ -85,7 +87,7 @@ impl Drop for BlockedRecordState {
 }
 
 #[derive(Clone)]
-pub struct KafkaService {
+pub(crate) struct KafkaService {
     kafka_producer: FutureProducer<KafkaStatisticsContext>,
 
     /// The number of records blocked from being enqueued on the producer.
@@ -121,7 +123,7 @@ impl Service<KafkaRequest> for KafkaService {
 
         Box::pin(async move {
             let raw_byte_size =
-                request.body.len() + request.metadata.key.as_ref().map_or(0, |x| x.len());
+                request.body.len() + request.metadata.key.as_ref().map_or(0, bytes::Bytes::len);
             let event_byte_size = request
                 .request_metadata
                 .into_events_estimated_json_encoded_byte_size();
@@ -153,12 +155,16 @@ impl Service<KafkaRequest> for KafkaService {
                             .map(|_| KafkaResponse {
                                 event_byte_size,
                                 raw_byte_size,
+                                event_status: EventStatus::Delivered,
                             })
                             .map_err(|(err, _)| err);
                     }
-                    // Producer queue is full.
+                    // Producer queue is full or a policy has been violated and the request should
+                    // be retried
                     Err((
-                        KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull),
+                        KafkaError::MessageProduction(
+                            RDKafkaErrorCode::QueueFull | RDKafkaErrorCode::PolicyViolation,
+                        ),
                         original_record,
                     )) => {
                         if blocked_state.is_none() {
@@ -168,9 +174,31 @@ impl Service<KafkaRequest> for KafkaService {
                         record = original_record;
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
-                    // A different error occurred.
-                    Err((err, _)) => return Err(err),
-                };
+                    // A final/non-retriable error occurred.
+                    Err((
+                        err @ KafkaError::MessageProduction(
+                            RDKafkaErrorCode::InvalidMessage
+                            | RDKafkaErrorCode::InvalidMessageSize
+                            | RDKafkaErrorCode::MessageSizeTooLarge
+                            | RDKafkaErrorCode::UnknownTopicOrPartition
+                            | RDKafkaErrorCode::InvalidRecord
+                            | RDKafkaErrorCode::InvalidRequiredAcks
+                            | RDKafkaErrorCode::TopicAuthorizationFailed
+                            | RDKafkaErrorCode::UnsupportedForMessageFormat
+                            | RDKafkaErrorCode::ClusterAuthorizationFailed,
+                        ),
+                        _,
+                    )) => return Err(err),
+
+                    // A different error occurred. Set event status to Errored not Rejected.
+                    Err(_) => {
+                        return Ok(KafkaResponse {
+                            event_byte_size: config::telemetry().create_request_count_byte_size(),
+                            raw_byte_size: 0,
+                            event_status: EventStatus::Errored,
+                        });
+                    }
+                }
             }
         })
     }

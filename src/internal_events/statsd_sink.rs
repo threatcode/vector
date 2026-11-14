@@ -1,16 +1,18 @@
-use metrics::counter;
-use vector_lib::internal_event::InternalEvent;
+use vector_lib::internal_event::{
+    ComponentEventsDropped, CounterName, InternalEvent, UNINTENTIONAL, emit, error_stage,
+    error_type,
+};
+use vector_lib::{NamedInternalEvent, counter};
 
 use crate::event::metric::{MetricKind, MetricValue};
-use vector_lib::internal_event::{error_stage, error_type, ComponentEventsDropped, UNINTENTIONAL};
 
-#[derive(Debug)]
-pub struct StatsdInvalidMetricError<'a> {
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct StatsdInvalidMetricError<'a> {
     pub value: &'a MetricValue,
     pub kind: MetricKind,
 }
 
-impl<'a> InternalEvent for StatsdInvalidMetricError<'a> {
+impl InternalEvent for StatsdInvalidMetricError<'_> {
     fn emit(self) {
         let reason = "Invalid metric type received.";
         error!(
@@ -20,15 +22,15 @@ impl<'a> InternalEvent for StatsdInvalidMetricError<'a> {
             stage = error_stage::PROCESSING,
             value = ?self.value,
             kind = ?self.kind,
-            internal_log_rate_limit = true,
         );
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_code" => "invalid_metric",
             "error_type" => error_type::ENCODER_FAILED,
             "stage" => error_stage::PROCESSING,
-        );
+        )
+        .increment(1);
 
-        emit!(ComponentEventsDropped::<UNINTENTIONAL> { reason, count: 1 });
+        emit(ComponentEventsDropped::<UNINTENTIONAL> { reason, count: 1 });
     }
 }

@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use vector_lib::configurable::configurable_component;
 
-pub mod chronicle_unstructured;
 pub mod cloud_storage;
 pub mod pubsub;
 pub mod stackdriver;
@@ -116,6 +115,11 @@ pub struct GcpSeries<'a> {
     time_series: &'a [GcpSerie],
 }
 
+// https://github.com/vectordotdev/vector/issues/23659
+#[expect(
+    clippy::ref_option,
+    reason = "Serde requires a reference to the field type."
+)]
 fn serialize_int64_value<S>(value: &Option<i64>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -137,6 +141,11 @@ where
     )
 }
 
+// https://github.com/vectordotdev/vector/issues/23659
+#[expect(
+    clippy::ref_option,
+    reason = "Serde requires a reference to the field type."
+)]
 fn serialize_optional_datetime<S>(
     value: &Option<chrono::DateTime<chrono::Utc>>,
     serializer: S,
@@ -149,10 +158,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::TimeZone;
 
-    /// Ensures that serialized `GcpSeries` matches the format that GCP expects (https://cloud.google.com/monitoring/api/ref_v3/rest/v3/TimeSeries).
+    use super::*;
+
+    /// Ensures that serialized `GcpSeries` matches the format that GCP expects (<https://cloud.google.com/monitoring/api/ref_v3/rest/v3/TimeSeries>).
     #[test]
     fn serialize_gcp_series() {
         let end_time = chrono::Utc

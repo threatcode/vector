@@ -1,9 +1,10 @@
-use metrics::counter;
-use vector_lib::internal_event::InternalEvent;
-use vector_lib::internal_event::{error_stage, error_type};
+use vector_lib::{
+    NamedInternalEvent, counter,
+    internal_event::{CounterName, InternalEvent, error_stage, error_type},
+};
 
-#[derive(Debug)]
-pub struct EventStoreDbMetricsHttpError {
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct EventStoreDbMetricsHttpError {
     pub error: crate::Error,
 }
 
@@ -14,18 +15,18 @@ impl InternalEvent for EventStoreDbMetricsHttpError {
             error = ?self.error,
             stage = error_stage::RECEIVING,
             error_type = error_type::REQUEST_FAILED,
-            internal_log_rate_limit = true,
         );
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "stage" => error_stage::RECEIVING,
             "error_type" => error_type::REQUEST_FAILED,
-        );
+        )
+        .increment(1);
     }
 }
 
-#[derive(Debug)]
-pub struct EventStoreDbStatsParsingError {
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct EventStoreDbStatsParsingError {
     pub error: serde_json::Error,
 }
 
@@ -36,12 +37,12 @@ impl InternalEvent for EventStoreDbStatsParsingError {
             error = ?self.error,
             stage = error_stage::PROCESSING,
             error_type = error_type::PARSER_FAILED,
-            internal_log_rate_limit = true,
         );
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "stage" => error_stage::PROCESSING,
             "error_type" => error_type::PARSER_FAILED,
-        );
+        )
+        .increment(1);
     }
 }

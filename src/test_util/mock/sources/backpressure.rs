@@ -1,18 +1,15 @@
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
 use futures_util::FutureExt;
-use vector_lib::configurable::configurable_component;
 use vector_lib::{
-    config::LogNamespace,
+    config::{DataType, LogNamespace, SourceOutput},
+    configurable::configurable_component,
     event::{Event, LogEvent},
     schema::Definition,
-};
-use vector_lib::{
-    config::{DataType, SourceOutput},
     source::Source,
 };
 
@@ -28,24 +25,28 @@ pub struct BackpressureSourceConfig {
 }
 
 impl GenerateConfig for BackpressureSourceConfig {
-    fn generate_config() -> toml::Value {
+    fn generate_config() -> serde_json::Value {
         let config = Self {
             counter: Arc::new(AtomicUsize::new(0)),
         };
-        toml::Value::try_from(&config).unwrap()
+        serde_json::to_value(&config).unwrap()
     }
 }
 
 #[async_trait]
 #[typetag::serde(name = "test_backpressure")]
 impl SourceConfig for BackpressureSourceConfig {
+    #[expect(
+        clippy::for_unbounded_range,
+        reason = "The mock produces events until its task is cancelled"
+    )]
     async fn build(&self, mut cx: SourceContext) -> crate::Result<Source> {
         let counter = Arc::clone(&self.counter);
         Ok(async move {
             for i in 0.. {
                 let _result = cx
                     .out
-                    .send_event(Event::Log(LogEvent::from(format!("event-{}", i))))
+                    .send_event(Event::Log(LogEvent::from(format!("event-{i}"))))
                     .await;
                 counter.fetch_add(1, Ordering::AcqRel);
 
@@ -64,8 +65,8 @@ impl SourceConfig for BackpressureSourceConfig {
     }
 
     fn outputs(&self, _global_log_namespace: LogNamespace) -> Vec<SourceOutput> {
-        vec![SourceOutput::new_logs(
-            DataType::all(),
+        vec![SourceOutput::new_maybe_logs(
+            DataType::all_bits(),
             Definition::default_legacy_namespace(),
         )]
     }

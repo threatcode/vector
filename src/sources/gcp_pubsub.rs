@@ -1,52 +1,64 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
-    error::Error as _, future::Future, pin::Pin, sync::Arc, task::Context, task::Poll,
+    error::Error as _,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
     time::Duration,
 };
+use vector_lib::internal_event::{emit, register};
 
 use chrono::DateTime;
 use derivative::Derivative;
-use futures::{stream, stream::FuturesUnordered, FutureExt, Stream, StreamExt, TryFutureExt};
-use http::uri::{InvalidUri, Scheme, Uri};
-use once_cell::sync::Lazy;
+use futures::{FutureExt, Stream, StreamExt, TryFutureExt, stream, stream::FuturesUnordered};
+use http::uri::{InvalidUri, Uri};
+use hyper_util::{client::legacy::Builder, rt::TokioExecutor};
 use serde_with::serde_as;
 use snafu::{ResultExt, Snafu};
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{
-    metadata::{errors::InvalidMetadataValue, MetadataValue},
-    transport::{Certificate, ClientTlsConfig, Endpoint, Identity},
-    Code, Request, Status,
+use tonic::{Code, Request, Status, body::Body as TonicBody, metadata::MetadataValue};
+use vector_http::{GrpcTransport, Http2Client};
+use vector_lib::{
+    byte_size_of::ByteSizeOf,
+    codecs::decoding::{DeserializerConfig, FramingConfig},
+    config::{LegacyKey, LogNamespace},
+    configurable::configurable_component,
+    finalizer::UnorderedFinalizer,
+    internal_event::{
+        ByteSize, BytesReceived, EventsReceived, InternalEventHandle as _, Protocol, Registered,
+    },
+    lookup::owned_value_path,
 };
-use vector_lib::codecs::decoding::{DeserializerConfig, FramingConfig};
-use vector_lib::config::{LegacyKey, LogNamespace};
-use vector_lib::configurable::configurable_component;
-use vector_lib::internal_event::{
-    ByteSize, BytesReceived, EventsReceived, InternalEventHandle as _, Protocol, Registered,
+use vrl::{
+    path,
+    value::{Kind, kind::Collection},
 };
-use vector_lib::lookup::owned_value_path;
-use vector_lib::{byte_size_of::ByteSizeOf, finalizer::UnorderedFinalizer};
-use vrl::path;
-use vrl::value::{kind::Collection, Kind};
 
 use crate::{
+    SourceSender,
     codecs::{Decoder, DecodingConfig},
     config::{DataType, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput},
     event::{BatchNotifier, BatchStatus, Event, MaybeAsLogMut, Value},
-    gcp::{GcpAuthConfig, GcpAuthenticator, Scope, PUBSUB_URL},
+    gcp::{GcpAuthConfig, GcpAuthenticator, PUBSUB_URL, Scope},
     internal_events::{
         GcpPubsubConnectError, GcpPubsubReceiveError, GcpPubsubStreamingPullError,
         StreamClosedError,
     },
-    serde::{bool_or_struct, default_decoding, default_framing_message_based},
+    serde::{default_decoding, default_framing_message_based},
     shutdown::ShutdownSignal,
     sources::util,
     tls::{TlsConfig, TlsSettings},
-    SourceSender,
 };
 
 const MIN_ACK_DEADLINE_SECS: u64 = 10;
 const MAX_ACK_DEADLINE_SECS: u64 = 600;
+const TIMESTAMP_KEY: &str = "timestamp";
+const ATTRIBUTES_KEY: &str = "attributes";
+const MESSAGE_ID_KEY: &str = "message_id";
 
 // We use a bounded channel for the acknowledgement ID communication
 // between the request stream and receiver. During benchmark runs,
@@ -58,13 +70,9 @@ const ACK_QUEUE_SIZE: usize = 8;
 
 type Finalizer = UnorderedFinalizer<Vec<String>>;
 
-// prost emits some generated code that includes clones on `Arc`
-// objects, which causes a clippy ding on this block. We don't
-// directly control the generated code, so allow this lint here.
-#[allow(clippy::clone_on_ref_ptr)]
 // https://github.com/hyperium/tonic/issues/1350
 #[allow(clippy::missing_const_for_fn)]
-#[allow(warnings)]
+#[allow(warnings, unreachable_pub, clippy::clone_on_ref_ptr)]
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/google.pubsub.v1.rs"));
 
@@ -94,31 +102,17 @@ mod proto {
 
 #[derive(Debug, Snafu)]
 pub(crate) enum PubsubError {
-    #[snafu(display("Could not parse credentials metadata: {}", source))]
-    Metadata { source: InvalidMetadataValue },
     #[snafu(display("Invalid endpoint URI: {}", source))]
     Uri { source: InvalidUri },
-    #[snafu(display("Could not create endpoint: {}", source))]
-    Endpoint { source: tonic::transport::Error },
-    #[snafu(display("Could not set up endpoint TLS settings: {}", source))]
-    EndpointTls { source: tonic::transport::Error },
-    #[snafu(display("Could not connect: {}", source))]
-    Connect { source: tonic::transport::Error },
-    #[snafu(display("Could not pull data from remote: {}", source))]
-    Pull { source: Status },
     #[snafu(display(
         "`ack_deadline_secs` is outside the valid range of {} to {}",
         MIN_ACK_DEADLINE_SECS,
         MAX_ACK_DEADLINE_SECS
     ))]
     InvalidAckDeadline,
-    #[snafu(display("Cannot set both `ack_deadline_secs` and `ack_deadline_seconds`"))]
-    BothAckDeadlineSecsAndSeconds,
-    #[snafu(display("Cannot set both `retry_delay_secs` and `retry_delay_seconds`"))]
-    BothRetryDelaySecsAndSeconds,
 }
 
-static CLIENT_ID: Lazy<String> = Lazy::new(|| uuid::Uuid::new_v4().to_string());
+static CLIENT_ID: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
 /// Configuration for the `gcp_pubsub` source.
 #[serde_as]
@@ -146,7 +140,6 @@ pub struct PubsubConfig {
     #[serde(flatten)]
     pub auth: GcpAuthConfig,
 
-    #[configurable(derived)]
     pub tls: Option<TlsConfig>,
 
     /// The maximum number of concurrent stream connections to open at once.
@@ -210,18 +203,15 @@ pub struct PubsubConfig {
     #[serde(default)]
     pub log_namespace: Option<bool>,
 
-    #[configurable(derived)]
     #[serde(default = "default_framing_message_based")]
     #[derivative(Default(value = "default_framing_message_based()"))]
     pub framing: FramingConfig,
 
-    #[configurable(derived)]
     #[serde(default = "default_decoding")]
     #[derivative(Default(value = "default_decoding()"))]
     pub decoding: DeserializerConfig,
 
-    #[configurable(derived)]
-    #[serde(default, deserialize_with = "bool_or_struct")]
+    #[serde(default, deserialize_with = "crate::serde::bool_or_struct")]
     pub acknowledgements: SourceAcknowledgementsConfig,
 }
 
@@ -230,7 +220,7 @@ fn default_endpoint() -> String {
 }
 
 const fn default_ack_deadline() -> Duration {
-    Duration::from_secs(600)
+    Duration::from_mins(10)
 }
 
 const fn default_retry_delay() -> Duration {
@@ -238,7 +228,7 @@ const fn default_retry_delay() -> Duration {
 }
 
 const fn default_keepalive() -> Duration {
-    Duration::from_secs(60)
+    Duration::from_mins(1)
 }
 
 const fn default_max_concurrency() -> usize {
@@ -261,8 +251,10 @@ impl SourceConfig for PubsubConfig {
         let ack_deadline_secs = match self.ack_deadline_seconds {
             None => self.ack_deadline_secs,
             Some(ads) => {
-                warn!("The `ack_deadline_seconds` setting is deprecated, use `ack_deadline_secs` instead.");
-                Duration::from_secs(ads as u64)
+                warn!(
+                    "The `ack_deadline_seconds` setting is deprecated, use `ack_deadline_secs` instead."
+                );
+                Duration::from_secs(u64::from(ads))
             }
         };
         if !(MIN_ACK_DEADLINE_SECS..=MAX_ACK_DEADLINE_SECS).contains(&ack_deadline_secs.as_secs()) {
@@ -272,7 +264,9 @@ impl SourceConfig for PubsubConfig {
         let retry_delay_secs = match self.retry_delay_seconds {
             None => self.retry_delay_secs,
             Some(rds) => {
-                warn!("The `retry_delay_seconds` setting is deprecated, use `retry_delay_secs` instead.");
+                warn!(
+                    "The `retry_delay_seconds` setting is deprecated, use `retry_delay_secs` instead."
+                );
                 Duration::from_secs_f64(rds)
             }
         };
@@ -282,30 +276,26 @@ impl SourceConfig for PubsubConfig {
         let mut uri: Uri = self.endpoint.parse().context(UriSnafu)?;
         auth.apply_uri(&mut uri);
 
-        let tls = TlsSettings::from_options(&self.tls)?;
-        let host = uri.host().unwrap_or("pubsub.googleapis.com");
-        let mut tls_config = ClientTlsConfig::new().domain_name(host);
-        if let Some((cert, key)) = tls.identity_pem() {
-            tls_config = tls_config.identity(Identity::from_pem(cert, key));
-        }
-        for authority in tls.authorities_pem() {
-            tls_config = tls_config.ca_certificate(Certificate::from_pem(authority));
-        }
+        let protocol = uri
+            .scheme()
+            .map_or(Protocol::HTTP, |scheme| Protocol(scheme.to_string().into()));
 
-        let mut endpoint: Endpoint = uri.to_string().parse().context(EndpointSnafu)?;
-        if uri.scheme() != Some(&Scheme::HTTP) {
-            endpoint = endpoint.tls_config(tls_config).context(EndpointTlsSnafu)?;
-        }
+        let mut tls_config = self.tls.clone().unwrap_or_default();
+        // Preserve Tonic's default ALPN while honoring an explicit protocol list.
+        tls_config
+            .alpn_protocols
+            .get_or_insert_with(|| vec!["h2".to_owned()]);
+        // Pub/Sub's configured CAs supplement system roots, as they did with Tonic.
+        let tls = TlsSettings::from_options(Some(&tls_config))?.with_system_roots();
+        let mut builder = Builder::new(TokioExecutor::new());
+        builder.http2_max_header_list_size(vector_common::constants::HTTP2_MAX_HEADER_LIST_SIZE);
+        let client = Http2Client::new(tls.into(), &cx.proxy, builder)?;
 
         let token_generator = auth.spawn_regenerate_token();
 
-        let protocol = uri
-            .scheme()
-            .map(|scheme| Protocol(scheme.to_string().into()))
-            .unwrap_or(Protocol::HTTP);
-
         let source = PubsubSource {
-            endpoint,
+            client,
+            origin: uri,
             auth,
             token_generator,
             subscription: format!(
@@ -324,14 +314,17 @@ impl SourceConfig for PubsubConfig {
             ack_deadline_secs,
             retry_delay: retry_delay_secs,
             keepalive: self.keepalive_secs,
-            concurrency: Default::default(),
+            concurrency: Arc::default(),
             full_response_size: self.full_response_size,
             log_namespace,
-            bytes_received: register!(BytesReceived::from(protocol)),
-            events_received: register!(EventsReceived),
+            bytes_received: register(BytesReceived::from(protocol)),
+            events_received: register(EventsReceived),
         }
         .run_all(self.max_concurrency, self.poll_time_seconds)
-        .map_err(|error| error!(message = "Source failed.", %error));
+        .map_err(|error| {
+            error!(message = "Source failed.", %error);
+            crate::sources::SourceError::from(error)
+        });
         Ok(Box::pin(source))
     }
 
@@ -343,27 +336,30 @@ impl SourceConfig for PubsubConfig {
             .with_standard_vector_source_metadata()
             .with_source_metadata(
                 PubsubConfig::NAME,
-                Some(LegacyKey::Overwrite(owned_value_path!("timestamp"))),
-                &owned_value_path!("timestamp"),
+                Some(LegacyKey::Overwrite(owned_value_path!(TIMESTAMP_KEY))),
+                &owned_value_path!(TIMESTAMP_KEY),
                 Kind::timestamp().or_undefined(),
-                Some("timestamp"),
+                Some(TIMESTAMP_KEY),
             )
             .with_source_metadata(
                 PubsubConfig::NAME,
-                Some(LegacyKey::Overwrite(owned_value_path!("attributes"))),
-                &owned_value_path!("attributes"),
+                Some(LegacyKey::Overwrite(owned_value_path!(ATTRIBUTES_KEY))),
+                &owned_value_path!(ATTRIBUTES_KEY),
                 Kind::object(Collection::empty().with_unknown(Kind::bytes())),
                 None,
             )
             .with_source_metadata(
                 PubsubConfig::NAME,
-                Some(LegacyKey::Overwrite(owned_value_path!("message_id"))),
-                &owned_value_path!("message_id"),
+                Some(LegacyKey::Overwrite(owned_value_path!(MESSAGE_ID_KEY))),
+                &owned_value_path!(MESSAGE_ID_KEY),
                 Kind::bytes(),
                 None,
             );
 
-        vec![SourceOutput::new_logs(DataType::Log, schema_definition)]
+        vec![SourceOutput::new_maybe_logs(
+            DataType::Log,
+            schema_definition,
+        )]
     }
 
     fn can_acknowledge(&self) -> bool {
@@ -375,7 +371,8 @@ impl_generate_config_from_default!(PubsubConfig);
 
 #[derive(Clone)]
 struct PubsubSource {
-    endpoint: Endpoint,
+    client: Http2Client<TonicBody>,
+    origin: Uri,
     auth: GcpAuthenticator,
     token_generator: watch::Receiver<()>,
     subscription: String,
@@ -419,7 +416,7 @@ impl PubsubSource {
                     }
 
                 },
-                _ = tokio::time::sleep(poll_time) => {
+                () = tokio::time::sleep(poll_time) => {
                     // If all of the tasks are marked as busy, start
                     // up a new one.
                     if tasks.len() < max_concurrency
@@ -446,7 +443,7 @@ impl PubsubSource {
         // when it has an idle interval it will mark itself as not
         // busy.
         let busy_flag = Arc::new(AtomicBool::new(false));
-        let task = tokio::spawn(self.clone().run(Arc::clone(&busy_flag)));
+        let task = crate::spawn_in_current_span(self.clone().run(Arc::clone(&busy_flag)));
         tasks.push(Task { task, busy_flag });
     }
 
@@ -459,7 +456,11 @@ impl PubsubSource {
                         timeout_secs = self.retry_delay.as_secs_f64(),
                         "Retrying after timeout."
                     );
-                    tokio::time::sleep(self.retry_delay).await;
+                    tokio::select! {
+                        biased;
+                        _ = &mut self.shutdown => break,
+                        () = tokio::time::sleep(self.retry_delay) => {}
+                    }
                 }
                 State::Shutdown => break,
             }
@@ -467,42 +468,44 @@ impl PubsubSource {
     }
 
     async fn run_once(&mut self, busy_flag: &Arc<AtomicBool>) -> State {
-        let connection = match self.endpoint.connect().await {
-            Ok(connection) => connection,
-            Err(error) => {
-                emit!(GcpPubsubConnectError { error });
-                return State::RetryDelay;
-            }
-        };
-
-        let mut client = proto::subscriber_client::SubscriberClient::with_interceptor(
-            connection,
-            |mut req: Request<()>| {
-                if let Some(token) = self.auth.make_token() {
-                    let authorization = MetadataValue::try_from(&token).map_err(|_| {
-                        Status::new(
-                            Code::FailedPrecondition,
-                            "Invalid token text returned by GCP",
-                        )
-                    })?;
-                    req.metadata_mut().insert("authorization", authorization);
-                }
-                Ok(req)
-            },
-        );
+        let mut client = proto::subscriber_client::SubscriberClient::with_origin(
+            GrpcTransport(self.client.clone()),
+            self.origin.clone(),
+        )
+        // Tonic added a default of 4MB in 0.9. This replaces the old behavior.
+        .max_decoding_message_size(usize::MAX);
 
         let (ack_ids_sender, ack_ids_receiver) = mpsc::channel(ACK_QUEUE_SIZE);
 
         // Handle shutdown during startup, the streaming pull doesn't
         // start if there is no data in the subscription.
-        let request_stream = self.request_stream(ack_ids_receiver);
+        let mut request = Request::new(self.request_stream(ack_ids_receiver));
+        if let Some(token) = self.auth.make_token() {
+            let Ok(authorization) = MetadataValue::try_from(&token) else {
+                emit(GcpPubsubStreamingPullError {
+                    error: Status::new(
+                        Code::FailedPrecondition,
+                        "Invalid token text returned by GCP",
+                    ),
+                });
+                return State::RetryDelay;
+            };
+            request
+                .metadata_mut()
+                .insert("authorization", authorization);
+        }
         debug!("Starting streaming pull.");
         let stream = tokio::select! {
             _ = &mut self.shutdown => return State::Shutdown,
-            result = client.streaming_pull(request_stream) => match result {
+            result = client.streaming_pull(request) => match result {
                 Ok(stream) => stream,
                 Err(error) => {
-                    emit!(GcpPubsubStreamingPullError { error });
+                    // The pooled transport connects on the first request, not at construction.
+                    if is_connect_error(&error) {
+                        emit(GcpPubsubConnectError { error });
+                    } else {
+                        emit(GcpPubsubStreamingPullError { error });
+                    }
                     return State::RetryDelay;
                 }
             }
@@ -516,14 +519,20 @@ impl PubsubSource {
         loop {
             tokio::select! {
                 biased;
-                receipts = ack_stream.next() => if let Some((status, receipts)) = receipts {
-                    pending_acks -= 1;
-                    if status == BatchStatus::Delivered {
-                        ack_ids_sender
-                            .send(receipts)
-                            .await
-                            .unwrap_or_else(|_| unreachable!("request stream never closes"));
+                // The ack stream ends only after shutdown starts and the finalizer has reported
+                // every batch it tracked. Batches added after that never report, so `pending_acks`
+                // may stay above zero and must not keep the stream open.
+                receipts = ack_stream.next() => match receipts {
+                    Some((status, receipts)) => {
+                        pending_acks -= 1;
+                        if status == BatchStatus::Delivered {
+                            ack_ids_sender
+                                .send(receipts)
+                                .await
+                                .unwrap_or_else(|_| unreachable!("request stream never closes"));
+                        }
                     }
+                    None => return State::Shutdown,
                 },
                 response = stream.next() => match response {
                     Some(Ok(response)) => {
@@ -543,7 +552,7 @@ impl PubsubSource {
                     debug!("New authentication token generated, restarting stream.");
                     break State::RetryNow;
                 },
-                _ = tokio::time::sleep(self.keepalive) => {
+                () = tokio::time::sleep(self.keepalive) => {
                     if pending_acks == 0 {
                         // No pending acks, and no new data, so drop
                         // this stream if we aren't the only active
@@ -571,10 +580,14 @@ impl PubsubSource {
         }
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "Preserve the existing numeric conversion semantics of this source. https://github.com/vectordotdev/vector/issues/23659"
+    )]
     fn request_stream(
         &self,
         ack_ids: mpsc::Receiver<Vec<String>>,
-    ) -> impl Stream<Item = proto::StreamingPullRequest> + 'static {
+    ) -> impl Stream<Item = proto::StreamingPullRequest> + 'static + use<> {
         let subscription = self.subscription.clone();
         let client_id = CLIENT_ID.clone();
         let stream_ack_deadline_seconds = self.ack_deadline_secs.as_secs() as i32;
@@ -603,6 +616,10 @@ impl PubsubSource {
         }))
     }
 
+    #[allow(
+        clippy::ref_option,
+        reason = "Keep optional batch notifiers consistent with the event finalization API. https://github.com/vectordotdev/vector/issues/23659"
+    )]
     async fn handle_response(
         &mut self,
         response: proto::StreamingPullResponse,
@@ -617,11 +634,11 @@ impl PubsubSource {
         self.bytes_received.emit(ByteSize(response.size_of()));
 
         let (batch, notifier) = BatchNotifier::maybe_new_with_receiver(self.acknowledgements);
-        let (events, ids) = self.parse_messages(response.received_messages, batch).await;
+        let (events, ids) = self.parse_messages(response.received_messages, batch);
 
         let count = events.len();
         match self.out.send_batch(events).await {
-            Err(_) => emit!(StreamClosedError { count }),
+            Err(_) => emit(StreamClosedError { count }),
             Ok(()) => match notifier {
                 None => ack_ids
                     .send(ids)
@@ -638,7 +655,11 @@ impl PubsubSource {
         }
     }
 
-    async fn parse_messages(
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "Keep the batch notifier alive until all decoded events have been collected."
+    )]
+    fn parse_messages(
         &self,
         response: Vec<proto::ReceivedMessage>,
         batch: Option<BatchNotifier>,
@@ -646,7 +667,7 @@ impl PubsubSource {
         let mut ack_ids = Vec::with_capacity(response.len());
         let events = response
             .into_iter()
-            .flat_map(|received| {
+            .filter_map(|received| {
                 ack_ids.push(received.ack_id);
                 received
                     .message
@@ -657,6 +678,14 @@ impl PubsubSource {
         (events, ack_ids)
     }
 
+    #[allow(
+        clippy::ref_option,
+        reason = "Keep optional batch notifiers consistent with the event finalization API. https://github.com/vectordotdev/vector/issues/23659"
+    )]
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "Preserve the existing numeric conversion semantics of this source. https://github.com/vectordotdev/vector/issues/23659"
+    )]
     fn parse_message<'a>(
         &'a self,
         message: proto::PubsubMessage,
@@ -666,7 +695,7 @@ impl PubsubSource {
             message
                 .attributes
                 .into_iter()
-                .map(|(key, value)| (key.into(), Value::Bytes(value.into())))
+                .map(|(key, value)| (key.into(), Value::from(value)))
                 .collect(),
         );
         let log_namespace = self.log_namespace;
@@ -686,17 +715,17 @@ impl PubsubSource {
                 log_namespace.insert_source_metadata(
                     PubsubConfig::NAME,
                     log,
-                    Some(LegacyKey::Overwrite(path!("message_id"))),
-                    path!("message_id"),
+                    Some(LegacyKey::Overwrite(path!(MESSAGE_ID_KEY))),
+                    path!(MESSAGE_ID_KEY),
                     message.message_id.clone(),
                 );
                 log_namespace.insert_source_metadata(
                     PubsubConfig::NAME,
                     log,
-                    Some(LegacyKey::Overwrite(path!("attributes"))),
-                    path!("attributes"),
+                    Some(LegacyKey::Overwrite(path!(ATTRIBUTES_KEY))),
+                    path!(ATTRIBUTES_KEY),
                     attributes.clone(),
-                )
+                );
             }
             event
         })
@@ -714,18 +743,33 @@ fn translate_error(error: tonic::Status) -> State {
         debug!("Stream reset by server.");
         State::RetryNow
     } else {
-        emit!(GcpPubsubReceiveError { error });
+        emit(GcpPubsubReceiveError { error });
         State::RetryDelay
     }
 }
 
+/// Connection failures now arrive through the first streaming pull's status.
+fn is_connect_error(error: &Status) -> bool {
+    let mut source = error.source();
+    while let Some(error) = source {
+        if let Some(error) = error.downcast_ref::<hyper_util::client::legacy::Error>() {
+            return error.is_connect();
+        }
+        source = error.source();
+    }
+    false
+}
+
+/// Find the HTTP/2 reset through Tonic and transport error wrappers.
 fn is_reset(error: &Status) -> bool {
-    error
-        .source()
-        .and_then(|source| source.downcast_ref::<hyper::Error>())
-        .and_then(|error| error.source())
-        .and_then(|source| source.downcast_ref::<h2::Error>())
-        .map_or(false, |error| error.is_remote() && error.is_reset())
+    let mut source = error.source();
+    while let Some(error) = source {
+        if let Some(error) = error.downcast_ref::<h2::Error>() {
+            return error.is_remote() && error.is_reset();
+        }
+        source = error.source();
+    }
+    false
 }
 
 #[pin_project::pin_project]
@@ -744,10 +788,18 @@ impl Future for Task {
 
 #[cfg(test)]
 mod tests {
-    use vector_lib::lookup::OwnedTargetPath;
-    use vector_lib::schema::Definition;
+    use bytes::Bytes;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        time::timeout,
+    };
+    use vector_lib::{lookup::OwnedTargetPath, schema::Definition};
 
     use super::*;
+    use crate::tls::{
+        MaybeTlsSettings, TEST_PEM_CA_PATH, TEST_PEM_CRT_PATH, TEST_PEM_KEY_PATH,
+        TlsEnableableConfig,
+    };
 
     #[test]
     fn generate_config() {
@@ -831,36 +883,389 @@ mod tests {
 
         assert_eq!(definitions, Some(expected_definition));
     }
+
+    fn test_config(endpoint: String) -> PubsubConfig {
+        PubsubConfig {
+            project: "project".into(),
+            subscription: "subscription".into(),
+            endpoint,
+            auth: GcpAuthConfig {
+                skip_authentication: true,
+                ..Default::default()
+            },
+            max_concurrency: 1,
+            full_response_size: default_full_response(),
+            poll_time_seconds: default_poll_time(),
+            ack_deadline_secs: default_ack_deadline(),
+            retry_delay_secs: Duration::from_hours(1),
+            keepalive_secs: default_keepalive(),
+            ..Default::default()
+        }
+    }
+
+    /// Serves streaming pulls and resets each stream once the source acknowledges its first
+    /// response, then signals.
+    async fn serve_streams(
+        tls: MaybeTlsSettings,
+    ) -> (String, mpsc::UnboundedReceiver<Option<Vec<u8>>>) {
+        let scheme = if tls.is_tls() { "https" } else { "http" };
+        let mut listener = tls.bind(&"127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let endpoint = format!("{scheme}://{}", listener.local_addr().unwrap());
+        let (ready, streams) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok(mut socket) = listener.accept().await {
+                let ready = ready.clone();
+                tokio::spawn(async move {
+                    if socket.handshake().await.is_err() {
+                        return;
+                    }
+                    let alpn = socket
+                        .ssl_stream()
+                        .and_then(|stream| stream.ssl().selected_alpn_protocol())
+                        .map(<[u8]>::to_vec);
+                    let Ok(mut connection) = h2::server::handshake(socket).await else {
+                        return;
+                    };
+                    while let Some(Ok((request, mut respond))) = connection.accept().await {
+                        let ready = ready.clone();
+                        let alpn = alpn.clone();
+                        tokio::spawn(async move {
+                            let mut requests = request.into_body();
+                            requests.data().await.unwrap().unwrap();
+                            let response = http::Response::builder()
+                                .header("content-type", "application/grpc")
+                                .body(())
+                                .unwrap();
+                            let mut stream = respond.send_response(response, false).unwrap();
+                            // An empty `StreamingPullResponse`.
+                            stream
+                                .send_data(Bytes::from_static(&[0; 5]), false)
+                                .unwrap();
+                            // The acknowledgement shows the source is in its receive loop.
+                            requests.data().await.unwrap().unwrap();
+                            stream.send_reset(h2::Reason::INTERNAL_ERROR);
+                            _ = ready.send(alpn);
+                            while let Some(Ok(_)) = requests.data().await {}
+                        });
+                    }
+                });
+            }
+        });
+        (endpoint, streams)
+    }
+
+    #[tokio::test]
+    async fn remote_stream_reset_retries_immediately() {
+        let (endpoint, mut streams) = serve_streams(MaybeTlsSettings::Raw(())).await;
+        let (out, _events) = SourceSender::new_test();
+        let source = test_config(endpoint)
+            .build(SourceContext::new_test(out, None))
+            .await
+            .unwrap();
+        let source = tokio::spawn(source);
+        // The second stream starts well before the one-hour retry delay.
+        for _ in 0..2 {
+            timeout(Duration::from_secs(10), streams.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        source.abort();
+    }
+
+    #[rstest::rstest]
+    #[case::server_name(Some(true), Some(true), Some("localhost"), None)]
+    #[case::hostname_verification(Some(true), Some(false), None, None)]
+    #[case::certificate_verification(Some(false), Some(true), Some("localhost"), None)]
+    #[case::configured_alpn(Some(true), Some(true), Some("localhost"), Some("pubsub-test"))]
+    #[tokio::test]
+    async fn streaming_pull_uses_tls_settings(
+        #[case] verify_certificate: Option<bool>,
+        #[case] verify_hostname: Option<bool>,
+        #[case] server_name: Option<&str>,
+        #[case] alpn: Option<&str>,
+    ) {
+        let protocol = alpn.unwrap_or("h2");
+        let tls = MaybeTlsSettings::from_config(
+            Some(&TlsEnableableConfig {
+                enabled: Some(true),
+                options: TlsConfig {
+                    crt_file: Some(TEST_PEM_CRT_PATH.into()),
+                    key_file: Some(TEST_PEM_KEY_PATH.into()),
+                    alpn_protocols: Some(vec![protocol.to_owned()]),
+                    ..Default::default()
+                },
+            }),
+            true,
+        )
+        .unwrap();
+        let (endpoint, mut streams) = serve_streams(tls).await;
+        let mut config = test_config(endpoint);
+        config.tls = Some(TlsConfig {
+            ca_file: (verify_certificate != Some(false)).then(|| TEST_PEM_CA_PATH.into()),
+            verify_certificate,
+            verify_hostname,
+            server_name: server_name.map(str::to_owned),
+            alpn_protocols: alpn.map(|protocol| vec![protocol.to_owned()]),
+            ..Default::default()
+        });
+        let (out, _events) = SourceSender::new_test();
+        let source = config
+            .build(SourceContext::new_test(out, None))
+            .await
+            .unwrap();
+        let source = tokio::spawn(source);
+        // The peer has received an acknowledgement, not just a TLS handshake.
+        let negotiated = timeout(Duration::from_secs(10), streams.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(negotiated.as_deref(), Some(protocol.as_bytes()));
+        source.abort();
+    }
+
+    #[tokio::test]
+    async fn streaming_pull_uses_source_proxy() {
+        let (proxy, mut streams) = serve_streams(MaybeTlsSettings::Raw(())).await;
+        let (out, _events) = SourceSender::new_test();
+        let mut cx = SourceContext::new_test(out, None);
+        cx.proxy.http = Some(proxy);
+        let source = test_config("http://pubsub.invalid/".into())
+            .build(cx)
+            .await
+            .unwrap();
+        let source = tokio::spawn(source);
+        timeout(Duration::from_secs(10), streams.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        source.abort();
+    }
+
+    // Real TLS I/O cannot advance with Tokio's paused clock. Auto-advancing the
+    // timeout can otherwise expire before the operating system services the retry.
+    #[tokio::test]
+    async fn connection_failures_keep_error_event_and_retry_delay() {
+        use crate::test_util::components::{COMPONENT_TESTS_ERROR, init_test};
+        use tokio::{io::AsyncReadExt as _, time::Instant};
+
+        init_test();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("https://{}", listener.local_addr().unwrap());
+        let (attempts, mut received) = mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                // Abort TLS after the client hello. Each attempt must use the delayed retry path.
+                socket.read_u8().await.unwrap();
+                attempts.send(Instant::now()).unwrap();
+            }
+        });
+        let (out, _events) = SourceSender::new_test();
+        let mut config = test_config(endpoint);
+        config.retry_delay_secs = Duration::from_secs(5);
+        let source = config
+            .build(SourceContext::new_test(out, None))
+            .await
+            .unwrap();
+        let source = tokio::spawn(source);
+        let first = received.recv().await.unwrap();
+        let second = timeout(Duration::from_secs(20), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(second.duration_since(first) >= config.retry_delay_secs);
+        vector_lib::event_test_util::contains_name_once("GcpPubsubConnectError").unwrap();
+        COMPONENT_TESTS_ERROR.assert(&["error_code", "error_type", "stage"]);
+        source.abort();
+        server.abort();
+    }
+
+    /// Starts the source, waits for `ready`, and checks that it shuts down.
+    async fn assert_shuts_down(
+        config: PubsubConfig,
+        acknowledgements: bool,
+        ready: impl Future<Output = ()>,
+    ) {
+        let component = crate::config::ComponentKey::from("pubsub");
+        let (out, _events) = SourceSender::new_test();
+        let (mut context, mut shutdown) = SourceContext::new_shutdown(&component, out);
+        context.acknowledgements = acknowledgements;
+        let source = tokio::spawn(config.build(context).await.unwrap());
+        timeout(Duration::from_secs(10), ready).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        assert!(shutdown.shutdown_source(&component, deadline).await);
+        source.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn active_stream_shuts_down_with_acknowledgements() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (ready, streaming) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+            tokio::spawn(async move {
+                let mut requests = request.into_body();
+                requests.data().await.unwrap().unwrap();
+                let response = http::Response::builder()
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .unwrap();
+                let mut stream = respond.send_response(response, false).unwrap();
+                // An empty `StreamingPullResponse`.
+                stream
+                    .send_data(Bytes::from_static(&[0; 5]), false)
+                    .unwrap();
+                // The acknowledgement shows the source is in its receive loop.
+                requests.data().await.unwrap().unwrap();
+                ready.send(()).unwrap();
+                while let Some(Ok(_)) = requests.data().await {}
+            });
+            while connection.accept().await.is_some() {}
+        });
+
+        let ready = async { streaming.await.unwrap() };
+        assert_shuts_down(test_config(endpoint), true, ready).await;
+    }
+
+    #[tokio::test]
+    async fn connection_setup_and_retry_wait_shut_down() {
+        for fail_connection in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("https://{}", listener.local_addr().unwrap());
+            let (ready, connected) = tokio::sync::oneshot::channel();
+            let peer = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                socket.read_exact(&mut buffer[..1]).await.unwrap();
+                if fail_connection {
+                    socket.write_all(b"not TLS").await.unwrap();
+                    // The client closes this connection before waiting to retry.
+                    while matches!(socket.read(&mut buffer).await, Ok(size) if size > 0) {}
+                }
+                ready.send(()).unwrap();
+                if !fail_connection {
+                    // Keep the TLS handshake pending until shutdown closes it.
+                    while matches!(socket.read(&mut buffer).await, Ok(size) if size > 0) {}
+                }
+            });
+            let ready = async { connected.await.unwrap() };
+            assert_shuts_down(test_config(endpoint), false, ready).await;
+            peer.await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batches_sent_as_shutdown_starts_do_not_block_it() {
+        use prost::Message as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+            tokio::spawn(async move {
+                let mut requests = request.into_body();
+                requests.data().await.unwrap().unwrap();
+                let response = http::Response::builder()
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .unwrap();
+                let mut stream = respond.send_response(response, false).unwrap();
+                for id in ["a", "b", "c"] {
+                    let message = proto::StreamingPullResponse {
+                        received_messages: vec![proto::ReceivedMessage {
+                            ack_id: id.into(),
+                            message: Some(proto::PubsubMessage {
+                                data: id.into(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }
+                    .encode_to_vec();
+                    let mut frame = vec![0];
+                    frame.extend_from_slice(&u32::try_from(message.len()).unwrap().to_be_bytes());
+                    frame.extend_from_slice(&message);
+                    stream.send_data(frame.into(), false).unwrap();
+                }
+                while let Some(Ok(_)) = requests.data().await {}
+            });
+            while connection.accept().await.is_some() {}
+        });
+
+        let component = crate::config::ComponentKey::from("pubsub");
+        // Room for one batch: while the test holds back the output, the source blocks in
+        // `send_batch` on the third batch.
+        let (out, mut batches) = SourceSender::new_test_sender_with_options(1, None);
+        let (mut context, mut shutdown) = SourceContext::new_shutdown(&component, out);
+        context.acknowledgements = true;
+        let source = tokio::spawn(test_config(endpoint).build(context).await.unwrap());
+
+        let first = timeout(Duration::from_secs(10), batches.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let shutdown_complete = shutdown.shutdown_source(&component, deadline);
+        // Release the output only after shutdown starts. A source blocked in `send_batch` then adds
+        // its batch to a finalizer that has stopped. The source drops its output once it stops.
+        drop(first);
+        timeout(Duration::from_secs(20), async {
+            while batches.next().await.is_some() {}
+        })
+        .await
+        .unwrap();
+        assert!(shutdown_complete.await);
+        source.await.unwrap().unwrap();
+    }
 }
 
 #[cfg(all(test, feature = "gcp-integration-tests"))]
 mod integration_tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        sync::LazyLock,
+    };
 
-    use base64::prelude::{Engine as _, BASE64_STANDARD};
+    use base64::prelude::{BASE64_STANDARD, Engine as _};
     use chrono::{DateTime, Utc};
     use futures::{Stream, StreamExt};
-    use http::method::Method;
-    use hyper::{Request, StatusCode};
-    use once_cell::sync::Lazy;
-    use serde_json::{json, Value};
+    use http::{Method, Request, StatusCode};
+    use http_body_util::BodyExt as _;
+    use serde_json::{Value, json};
     use tokio::time::{Duration, Instant};
-    use vrl::btreemap;
+    use vrl::{btreemap, event_path};
 
     use super::*;
-    use crate::config::{ComponentKey, ProxyConfig};
-    use crate::test_util::components::{assert_source_compliance, SOURCE_TAGS};
-    use crate::test_util::{self, components, random_string};
-    use crate::{event::EventStatus, gcp, http::HttpClient, shutdown, SourceSender};
+    use crate::{
+        SourceSender,
+        config::{ComponentKey, ProxyConfig},
+        event::EventStatus,
+        gcp,
+        http::HttpClient,
+        shutdown,
+        test_util::{
+            self, components,
+            components::{SOURCE_TAGS, assert_source_compliance},
+            random_string,
+        },
+    };
 
     const PROJECT: &str = "sourceproject";
-    static PROJECT_URI: Lazy<String> =
-        Lazy::new(|| format!("{}/v1/projects/{}", *gcp::PUBSUB_ADDRESS, PROJECT));
-    static ACK_DEADLINE: Lazy<Duration> = Lazy::new(|| Duration::from_secs(10)); // Minimum custom deadline allowed by Pub/Sub
+    static PROJECT_URI: LazyLock<String> =
+        LazyLock::new(|| format!("{}/v1/projects/{PROJECT}", *gcp::PUBSUB_ADDRESS));
+    static ACK_DEADLINE: LazyLock<Duration> = LazyLock::new(|| Duration::from_secs(10)); // Minimum custom deadline allowed by Pub/Sub
 
+    #[ignore = "https://github.com/vectordotdev/vector/issues/24133"]
     #[tokio::test]
     async fn oneshot() {
-        assert_source_compliance(&SOURCE_TAGS, async {
+        assert_source_compliance(&SOURCE_TAGS, async move {
             let (tester, mut rx, shutdown) = setup(EventStatus::Delivered).await;
             let test_data = tester.send_test_events(99, BTreeMap::new()).await;
             receive_events(&mut rx, test_data).await;
@@ -869,6 +1274,7 @@ mod integration_tests {
         .await;
     }
 
+    #[ignore = "https://github.com/vectordotdev/vector/issues/24133"]
     #[tokio::test]
     async fn shuts_down_before_data_received() {
         let (tester, mut rx, shutdown) = setup(EventStatus::Delivered).await;
@@ -881,9 +1287,10 @@ mod integration_tests {
         assert_eq!(tester.pull_count(1).await, 1);
     }
 
+    #[ignore = "https://github.com/vectordotdev/vector/issues/24133"]
     #[tokio::test]
     async fn shuts_down_after_data_received() {
-        assert_source_compliance(&SOURCE_TAGS, async {
+        assert_source_compliance(&SOURCE_TAGS, async move {
             let (tester, mut rx, shutdown) = setup(EventStatus::Delivered).await;
 
             let test_data = tester.send_test_events(1, BTreeMap::new()).await;
@@ -904,9 +1311,10 @@ mod integration_tests {
         .await;
     }
 
+    #[ignore = "https://github.com/vectordotdev/vector/issues/24133"]
     #[tokio::test]
     async fn streams_data() {
-        assert_source_compliance(&SOURCE_TAGS, async {
+        assert_source_compliance(&SOURCE_TAGS, async move {
             let (tester, mut rx, shutdown) = setup(EventStatus::Delivered).await;
             for _ in 0..10 {
                 let test_data = tester.send_test_events(9, BTreeMap::new()).await;
@@ -917,9 +1325,10 @@ mod integration_tests {
         .await;
     }
 
+    #[ignore = "https://github.com/vectordotdev/vector/issues/24133"]
     #[tokio::test]
     async fn sends_attributes() {
-        assert_source_compliance(&SOURCE_TAGS, async {
+        assert_source_compliance(&SOURCE_TAGS, async move {
             let (tester, mut rx, shutdown) = setup(EventStatus::Delivered).await;
             let attributes = btreemap![
                 random_string(8) => random_string(88),
@@ -933,9 +1342,10 @@ mod integration_tests {
         .await;
     }
 
+    #[ignore = "https://github.com/vectordotdev/vector/issues/24133"]
     #[tokio::test]
     async fn acks_received() {
-        assert_source_compliance(&SOURCE_TAGS, async {
+        assert_source_compliance(&SOURCE_TAGS, async move {
             let (tester, mut rx, shutdown) = setup(EventStatus::Delivered).await;
 
             let test_data = tester.send_test_events(1, BTreeMap::new()).await;
@@ -959,7 +1369,7 @@ mod integration_tests {
     // I have verified manually that the streaming code above omits the
     // acknowledgements when events are rejected, but have been unable
     // to verify the events are not acknowledged through the emulator.
-    #[ignore]
+    #[ignore = "The emulator does not reliably expose missing acknowledgements for rejected events"]
     async fn does_not_ack_rejected() {
         assert_source_compliance(&SOURCE_TAGS, async {
             let (tester, mut rx, shutdown) = setup(EventStatus::Rejected).await;
@@ -990,8 +1400,8 @@ mod integration_tests {
     ) {
         components::init_test();
 
-        let tls_settings = TlsSettings::from_options(&None).unwrap();
-        let client = HttpClient::new(tls_settings, &ProxyConfig::default()).unwrap();
+        let tls_settings = TlsSettings::from_options(None).unwrap();
+        let client = HttpClient::new(tls_settings.into(), &ProxyConfig::default()).unwrap();
         let tester = Tester::new(client).await;
 
         let (rx, shutdown) = tester.spawn_source(status).await;
@@ -1030,7 +1440,7 @@ mod integration_tests {
             this.request(Method::PUT, "topics/{topic}", json!({})).await;
 
             let body = json!({
-                "topic": format!("projects/{}/topics/{}", PROJECT, this.topic),
+                "topic": format!("projects/{PROJECT}/topics/{}", this.topic),
                 "ackDeadlineSeconds": *ACK_DEADLINE,
             });
             this.request(Method::PUT, "subscriptions/{sub}", body).await;
@@ -1042,7 +1452,7 @@ mod integration_tests {
             &self,
             status: EventStatus,
         ) -> (
-            impl Stream<Item = Event> + Unpin,
+            impl Stream<Item = Event> + Unpin + use<>,
             shutdown::SourceShutdownCoordinator,
         ) {
             let (tx, rx) = SourceSender::new_test_finalize(status);
@@ -1098,8 +1508,7 @@ mod integration_tests {
                 .await;
             response
                 .get("receivedMessages")
-                .map(|rm| rm.as_array().unwrap().len())
-                .unwrap_or(0)
+                .map_or(0, |rm| rm.as_array().unwrap().len())
         }
 
         async fn request(&self, method: Method, base: &str, body: Value) -> Value {
@@ -1111,12 +1520,12 @@ mod integration_tests {
             let request = Request::builder()
                 .method(method)
                 .uri(uri)
-                .body(body.into())
+                .body(vector_http::full_body(body))
                 .unwrap();
             let response = self.client.send(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
-            serde_json::from_str(&String::from_utf8(body.to_vec()).unwrap()).unwrap()
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_str(core::str::from_utf8(&body).unwrap()).unwrap()
         }
 
         async fn shutdown_check(&self, shutdown: shutdown::SourceShutdownCoordinator) {
@@ -1151,16 +1560,36 @@ mod integration_tests {
         assert_eq!(events.len(), lines.len());
         for (message, event) in lines.into_iter().zip(events) {
             let log = event.into_log();
-            assert_eq!(log.get("message"), Some(&message.into()));
-            assert_eq!(log.get("source_type"), Some(&"gcp_pubsub".into()));
-            assert!(log.get("timestamp").unwrap().as_timestamp().unwrap() >= &start);
-            assert!(log.get("timestamp").unwrap().as_timestamp().unwrap() <= &end);
+            assert_eq!(log.get(event_path!("message")), Some(&message.into()));
+            assert_eq!(
+                log.get(event_path!("source_type")),
+                Some(&"gcp_pubsub".into())
+            );
             assert!(
-                message_ids.insert(log.get("message_id").unwrap().clone().to_string()),
+                log.get(event_path!("timestamp"))
+                    .unwrap()
+                    .as_timestamp()
+                    .unwrap()
+                    >= &start
+            );
+            assert!(
+                log.get(event_path!("timestamp"))
+                    .unwrap()
+                    .as_timestamp()
+                    .unwrap()
+                    <= &end
+            );
+            assert!(
+                message_ids.insert(
+                    log.get(event_path!("message_id"))
+                        .unwrap()
+                        .clone()
+                        .to_string()
+                ),
                 "Message contained duplicate message_id"
             );
             let logattr = log
-                .get("attributes")
+                .get(event_path!("attributes"))
                 .expect("missing attributes")
                 .as_object()
                 .unwrap()

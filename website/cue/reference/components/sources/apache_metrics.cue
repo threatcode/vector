@@ -4,8 +4,7 @@ components: sources: apache_metrics: {
 	title: "Apache HTTP Server (HTTPD) Metrics"
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["daemon", "sidecar"]
 		development:   "stable"
 		egress_method: "batch"
@@ -43,14 +42,13 @@ components: sources: apache_metrics: {
 			""",
 		]
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.apache_metrics.configuration
+	configuration: generated.components.sources.apache_metrics.configuration
 
 	output: metrics: {
 		// Default Apache metrics tags

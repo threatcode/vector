@@ -8,7 +8,7 @@ use crate::sinks::util::test::build_test_server_status;
 // signaling status. This enum allows us to signal which API endpoint and what
 // kind of response we want our test to model without getting into the details
 // of exactly what that code is.
-pub(super) enum ApiStatus {
+pub enum ApiStatus {
     OKv1,
     #[cfg(feature = "sinks-datadog_logs")]
     OKv2,
@@ -18,7 +18,13 @@ pub(super) enum ApiStatus {
     BadRequestv2,
 }
 
-pub(super) fn test_server(
+/// Starts an HTTP test server that captures http 1 request parts and body bytes.
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Keep ownership and drop timing unchanged during the lint rollout."
+)]
+pub fn test_server(
     addr: std::net::SocketAddr,
     api_status: ApiStatus,
 ) -> (

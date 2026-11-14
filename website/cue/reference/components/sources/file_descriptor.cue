@@ -4,8 +4,7 @@ components: sources: file_descriptor: {
 	title: "File Descriptor"
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["sidecar"]
 		development:   "stable"
 		egress_method: "stream"
@@ -33,21 +32,28 @@ components: sources: file_descriptor: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.file_descriptor.configuration
+	configuration: generated.components.sources.file_descriptor.configuration
 
-	output: logs: line: {
-		description: "An individual event from the file descriptor."
-		fields: {
-			host:      fields._local_host
-			message:   fields._raw_line
-			timestamp: fields._current_timestamp
+	output: {
+		logs: line: {
+			description: "An individual event from the file descriptor."
+			fields: {
+				host:      fields._local_host
+				message:   fields._raw_line
+				timestamp: fields._current_timestamp
+			}
+		}
+		metrics: "": {
+			description: "Metric events that may be emitted by this source."
+		}
+		traces: "": {
+			description: "Trace events that may be emitted by this source."
 		}
 	}
 

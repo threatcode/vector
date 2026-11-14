@@ -1,9 +1,11 @@
-use metrics::counter;
-use vector_lib::internal_event::InternalEvent;
-use vector_lib::internal_event::{error_stage, error_type};
+use vector_lib::{
+    NamedInternalEvent, counter,
+    internal_event::{CounterName, InternalEvent, error_stage, error_type},
+};
 
-pub struct GcpPubsubConnectError {
-    pub error: tonic::transport::Error,
+#[derive(NamedInternalEvent)]
+pub(crate) struct GcpPubsubConnectError {
+    pub error: tonic::Status,
 }
 
 impl InternalEvent for GcpPubsubConnectError {
@@ -14,19 +16,20 @@ impl InternalEvent for GcpPubsubConnectError {
             error_code = "failed_connecting",
             error_type = error_type::CONNECTION_FAILED,
             stage = error_stage::RECEIVING,
-            internal_log_rate_limit = true,
         );
 
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_code" => "failed_connecting",
             "error_type" => error_type::CONNECTION_FAILED,
             "stage" => error_stage::RECEIVING,
-        );
+        )
+        .increment(1);
     }
 }
 
-pub struct GcpPubsubStreamingPullError {
+#[derive(NamedInternalEvent)]
+pub(crate) struct GcpPubsubStreamingPullError {
     pub error: tonic::Status,
 }
 
@@ -38,19 +41,20 @@ impl InternalEvent for GcpPubsubStreamingPullError {
             error_code = "failed_streaming_pull",
             error_type = error_type::REQUEST_FAILED,
             stage = error_stage::RECEIVING,
-            internal_log_rate_limit = true,
         );
 
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_code" => "failed_streaming_pull",
             "error_type" => error_type::REQUEST_FAILED,
             "stage" => error_stage::RECEIVING,
-        );
+        )
+        .increment(1);
     }
 }
 
-pub struct GcpPubsubReceiveError {
+#[derive(NamedInternalEvent)]
+pub(crate) struct GcpPubsubReceiveError {
     pub error: tonic::Status,
 }
 
@@ -62,14 +66,14 @@ impl InternalEvent for GcpPubsubReceiveError {
             error_code = "failed_fetching_events",
             error_type = error_type::REQUEST_FAILED,
             stage = error_stage::RECEIVING,
-            internal_log_rate_limit = true,
         );
 
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_code" => "failed_fetching_events",
             "error_type" => error_type::REQUEST_FAILED,
             "stage" => error_stage::RECEIVING,
-        );
+        )
+        .increment(1);
     }
 }

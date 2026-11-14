@@ -2,24 +2,27 @@ use std::fmt;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use futures::{future, stream::BoxStream, StreamExt};
+use futures::{StreamExt, future, stream::BoxStream};
 use tower::Service;
-use vector_lib::request_metadata::{MetaDescriptive, RequestMetadata};
-use vector_lib::stream::{BatcherSettings, DriverResponse};
-use vector_lib::{partition::Partitioner, sink::StreamSink};
+use vector_lib::{
+    partition::Partitioner,
+    request_metadata::{MetaDescriptive, RequestMetadata},
+    sink::StreamSink,
+    stream::{BatcherSettings, DriverResponse},
+};
 
 use crate::{
     event::{Event, EventFinalizers, Finalizable},
     sinks::{
         aws_cloudwatch_logs::{
-            request_builder::{CloudwatchRequest, CloudwatchRequestBuilder},
             CloudwatchKey,
+            request_builder::{CloudwatchRequest, CloudwatchRequestBuilder},
         },
         util::SinkBuilderExt,
     },
 };
 
-pub struct CloudwatchSink<S> {
+pub(super) struct CloudwatchSink<S> {
     pub batcher_settings: BatcherSettings,
     pub(super) request_builder: CloudwatchRequestBuilder,
     pub service: S,
@@ -46,7 +49,7 @@ where
                 let age_range = start..end;
                 future::ready(age_range.contains(&req.timestamp))
             })
-            .batched_partitioned(CloudwatchPartitioner, || {
+            .batched_partitioned(CloudwatchPartitioner, batcher_settings.timeout, |_| {
                 batcher_settings.as_byte_size_config()
             })
             .map(|(key, events)| {
@@ -67,7 +70,7 @@ where
 }
 
 #[derive(Clone)]
-pub struct BatchCloudwatchRequest {
+pub(super) struct BatchCloudwatchRequest {
     pub key: CloudwatchKey,
     pub events: Vec<CloudwatchRequest>,
     metadata: RequestMetadata,

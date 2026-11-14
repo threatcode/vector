@@ -9,8 +9,7 @@ components: sources: aws_ecs_metrics: {
 		"""
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["sidecar"]
 		development:   "stable"
 		egress_method: "batch"
@@ -44,14 +43,13 @@ components: sources: aws_ecs_metrics: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.aws_ecs_metrics.configuration
+	configuration: generated.components.sources.aws_ecs_metrics.configuration
 
 	output: metrics: {
 		_awsecs: {

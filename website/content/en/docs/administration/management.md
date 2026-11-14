@@ -176,14 +176,14 @@ docker restart -f $(docker ps -aqf "name=vector")
 {{< /tab >}}
 {{< /tabs >}}
 
-The commands above involve configuring Vector using TOML, but you can also use JSON or YAML. You can also use one of
+The commands above involve configuring Vector using YAML, but you can also use TOML or JSON. You can also use one of
 three image variants (the commands assume `alpine`):
 
-Variant | Image basis
-:-------|:-----------
-`alpine` | [Alpine](https://hub.docker.com/_/alpine), a Linux distro built around [musl libc](https://www.musl-libc.org) and [BusyBox](https://busybox.net)
-`debian` | The [`debian-slim`](https://hub.docker.com/_/debian) image, which is a smaller and more compact version of the standard `debian` image
-`distroless` | The [Distroless](https://github.com/GoogleContainerTools/distroless) project, which provides extremely lean images with no package managers, shells, or other inessential utilities
+| Variant | Image basis |
+| :-------- | :----------- |
+| `alpine` | [Alpine](https://hub.docker.com/_/alpine), a Linux distro built around [musl libc](https://www.musl-libc.org) and [BusyBox](https://busybox.net) |
+| `debian` | The [`debian-slim`](https://hub.docker.com/_/debian) image, which is a smaller and more compact version of the standard `debian` image |
+| `distroless` | The [Distroless](https://github.com/GoogleContainerTools/distroless) project, which provides extremely lean images with no package managers, shells, or other inessential utilities |
 
 ### Helm
 
@@ -218,6 +218,13 @@ As you can see above, many administrative interfaces for Vector enable you to tr
 
 You can make Vector automatically reload itself when its [configuration file][configuration] changes by setting the `--watch-config` or `-w` [flag][watch_config] when you first start your Vector instance.
 
+Additionally you can add method for watching config change by setting the `--watch-config-method` to `recommended` or `poll`.
+
+`recommended` is default and it uses file event listener for file change events.
+`poll` can used where the event listener won't work, eg. attaching config files by NFS/EFS, which will poll for file changes on certain interval.
+
+You can set the poll interval by setting flag `--watch-config-poll-interval-seconds`. which defaults to `30`.
+
 ## How it works
 
 Running Vector instances accept the IPC [signals](#signals) and produce the [exit codes](#exit-codes) listed below.
@@ -226,7 +233,7 @@ Running Vector instances accept the IPC [signals](#signals) and produce the [exi
 
 [apt]: /docs/setup/installation/package-managers/apt
 [brew_services]: https://github.com/Homebrew/homebrew-services
-[bug]: https://github.com/vectordotdev/vector/issues/new?labels=type%3A+bug
+[bug]: https://github.com/vectordotdev/vector/issues/new?template=bug.yml
 [configuration]: /docs/reference/configuration
 [docker]: /docs/setup/installation/platforms/docker
 [dpkg]: /docs/setup/installation/package-managers/dpkg

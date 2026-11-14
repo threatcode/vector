@@ -4,7 +4,6 @@ components: sinks: influxdb_metrics: {
 	title: "InfluxDB Metrics"
 
 	classes: {
-		commonly_used: false
 		delivery:      "at_least_once"
 		development:   "stable"
 		egress_method: "batch"
@@ -19,7 +18,6 @@ components: sinks: influxdb_metrics: {
 		send: {
 			batch: {
 				enabled:      true
-				common:       false
 				max_events:   20
 				timeout_secs: 1.0
 			}
@@ -40,10 +38,9 @@ components: sinks: influxdb_metrics: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.sinks.influxdb_metrics.configuration
+	configuration: generated.components.sinks.influxdb_metrics.configuration
 
 	input: {
 		logs: false
@@ -176,7 +173,7 @@ components: sinks: influxdb_metrics: {
 				summary: {
 					quantiles: [
 						{upper_limit: 0.01, value: 1.5},
-						{upper_limit: 0.5, value:  2.0},
+						{upper_limit: 0.5, value: 2.0},
 						{upper_limit: 0.99, value: 3.0},
 					]
 					count: 6

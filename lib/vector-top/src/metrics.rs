@@ -1,0 +1,696 @@
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
+
+use glob::Pattern;
+use tokio::task::JoinHandle;
+use tokio_stream::StreamExt;
+use vector_api_client::{
+    Client,
+    proto::{
+        Component, ComponentType, InternalMetricKind, MetricName,
+        stream_component_metrics_response::Value,
+    },
+};
+use vector_common::internal_event::all_metrics;
+
+use crate::state::{self, OutputMetrics, SentEventsMetric};
+use vector_common::config::ComponentKey;
+
+fn component_matches_patterns(component_id: &str, components_patterns: &[Pattern]) -> bool {
+    if components_patterns.is_empty() {
+        return true;
+    }
+
+    components_patterns
+        .iter()
+        .any(|pattern| pattern.matches(component_id))
+}
+
+/// Component polling task
+///
+/// Polls for component changes every interval and diffs to detect adds/removes.
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "Preserve the existing conversion of the polling interval."
+)]
+async fn poll_components(
+    mut client: Client,
+    tx: state::EventTx,
+    interval_ms: i64,
+    components_patterns: Arc<[Pattern]>,
+    initial_components: HashSet<String>,
+) {
+    const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+
+    let mut known_components = initial_components;
+    let poll_interval = Duration::from_millis(interval_ms as u64);
+    let mut consecutive_errors = 0;
+
+    loop {
+        tokio::time::sleep(poll_interval).await;
+
+        // Fetch current components
+        let Ok(response) = client.get_components(0).await else {
+            consecutive_errors += 1;
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                // Exit to trigger reconnection after sustained failures
+                return;
+            }
+            continue;
+        };
+        consecutive_errors = 0;
+
+        let current_components: std::collections::HashSet<String> = response
+            .components
+            .iter()
+            .map(|c| c.component_id.clone())
+            .collect();
+
+        // Detect added components
+        for component in &response.components {
+            let component_id = &component.component_id;
+            if !known_components.contains(component_id)
+                && component_matches_patterns(component_id, &components_patterns)
+            {
+                let row = component_to_row(component);
+                _ = tx.send(state::EventType::ComponentAdded(row)).await;
+            }
+        }
+
+        // Detect removed components
+        for old_id in &known_components {
+            if !current_components.contains(old_id)
+                && component_matches_patterns(old_id, &components_patterns)
+            {
+                let key = ComponentKey::from(old_id.as_str());
+                _ = tx.send(state::EventType::ComponentRemoved(key)).await;
+            }
+        }
+
+        known_components = current_components;
+    }
+}
+
+fn component_to_row(component: &Component) -> state::ComponentRow {
+    let key = ComponentKey::from(component.component_id.as_str());
+    let metrics = component.metrics.as_ref();
+
+    state::ComponentRow {
+        key,
+        kind: match component.component_type() {
+            ComponentType::Unspecified => "unknown",
+            ComponentType::Source => "source",
+            ComponentType::Transform => "transform",
+            ComponentType::Sink => "sink",
+        }
+        .to_string(),
+        component_type: component.on_type.clone(), // actual plugin type e.g. "demo_logs", "kafka"
+        outputs: component
+            .outputs
+            .iter()
+            .map(|o| {
+                (
+                    o.output_id.clone(),
+                    OutputMetrics::from(o.sent_events_total),
+                )
+            })
+            .collect(),
+        received_bytes_total: metrics.and_then(|m| m.received_bytes_total).unwrap_or(0),
+        received_bytes_throughput_sec: 0,
+        received_events_total: metrics.and_then(|m| m.received_events_total).unwrap_or(0),
+        received_events_throughput_sec: 0,
+        sent_bytes_total: metrics.and_then(|m| m.sent_bytes_total).unwrap_or(0),
+        sent_bytes_throughput_sec: 0,
+        sent_events_total: metrics.and_then(|m| m.sent_events_total).unwrap_or(0),
+        sent_events_throughput_sec: 0,
+        #[cfg(unix)]
+        allocated_bytes: 0,
+        errors: 0,
+    }
+}
+
+/// Allocated bytes per component
+#[cfg(unix)]
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+async fn allocated_bytes(
+    mut client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Arc<[Pattern]>,
+) {
+    let Ok(mut stream) = client
+        .stream_component_allocated_bytes(interval as i32)
+        .await
+    else {
+        // Failed to establish stream, will retry on reconnection
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        let component_id = &response.component_id;
+        if !component_matches_patterns(component_id, &components_patterns) {
+            continue;
+        }
+
+        _ = tx
+            .send(state::EventType::AllocatedBytes(vec![(
+                ComponentKey::from(component_id.as_str()),
+                response.allocated_bytes,
+            )]))
+            .await;
+    }
+}
+
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+async fn received_bytes_totals(
+    mut client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Arc<[Pattern]>,
+) {
+    let Ok(mut stream) = client
+        .stream_component_metrics(MetricName::ReceivedBytesTotal, interval as i32)
+        .await
+    else {
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        let component_id = &response.component_id;
+        if !component_matches_patterns(component_id, &components_patterns) {
+            continue;
+        }
+        if let Some(Value::Total(total)) = response.value {
+            _ = tx
+                .send(state::EventType::ReceivedBytesTotals(vec![(
+                    ComponentKey::from(component_id.as_str()),
+                    total.value,
+                )]))
+                .await;
+        }
+    }
+}
+
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+async fn received_bytes_throughputs(
+    mut client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Arc<[Pattern]>,
+) {
+    let Ok(mut stream) = client
+        .stream_component_metrics(MetricName::ReceivedBytesThroughput, interval as i32)
+        .await
+    else {
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        let component_id = &response.component_id;
+        if !component_matches_patterns(component_id, &components_patterns) {
+            continue;
+        }
+        if let Some(Value::Throughput(tp)) = response.value {
+            _ = tx
+                .send(state::EventType::ReceivedBytesThroughputs(vec![(
+                    ComponentKey::from(component_id.as_str()),
+                    tp.value as i64,
+                )]))
+                .await;
+        }
+    }
+}
+
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+async fn received_events_totals(
+    mut client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Arc<[Pattern]>,
+) {
+    let Ok(mut stream) = client
+        .stream_component_metrics(MetricName::ReceivedEventsTotal, interval as i32)
+        .await
+    else {
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        let component_id = &response.component_id;
+        if !component_matches_patterns(component_id, &components_patterns) {
+            continue;
+        }
+        if let Some(Value::Total(total)) = response.value {
+            _ = tx
+                .send(state::EventType::ReceivedEventsTotals(vec![(
+                    ComponentKey::from(component_id.as_str()),
+                    total.value,
+                )]))
+                .await;
+        }
+    }
+}
+
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+async fn received_events_throughputs(
+    mut client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Arc<[Pattern]>,
+) {
+    let Ok(mut stream) = client
+        .stream_component_metrics(MetricName::ReceivedEventsThroughput, interval as i32)
+        .await
+    else {
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        let component_id = &response.component_id;
+        if !component_matches_patterns(component_id, &components_patterns) {
+            continue;
+        }
+        if let Some(Value::Throughput(tp)) = response.value {
+            _ = tx
+                .send(state::EventType::ReceivedEventsThroughputs(vec![(
+                    ComponentKey::from(component_id.as_str()),
+                    tp.value as i64,
+                )]))
+                .await;
+        }
+    }
+}
+
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+async fn sent_bytes_totals(
+    mut client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Arc<[Pattern]>,
+) {
+    let Ok(mut stream) = client
+        .stream_component_metrics(MetricName::SentBytesTotal, interval as i32)
+        .await
+    else {
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        let component_id = &response.component_id;
+        if !component_matches_patterns(component_id, &components_patterns) {
+            continue;
+        }
+        if let Some(Value::Total(total)) = response.value {
+            _ = tx
+                .send(state::EventType::SentBytesTotals(vec![(
+                    ComponentKey::from(component_id.as_str()),
+                    total.value,
+                )]))
+                .await;
+        }
+    }
+}
+
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+async fn sent_bytes_throughputs(
+    mut client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Arc<[Pattern]>,
+) {
+    let Ok(mut stream) = client
+        .stream_component_metrics(MetricName::SentBytesThroughput, interval as i32)
+        .await
+    else {
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        let component_id = &response.component_id;
+        if !component_matches_patterns(component_id, &components_patterns) {
+            continue;
+        }
+        if let Some(Value::Throughput(tp)) = response.value {
+            _ = tx
+                .send(state::EventType::SentBytesThroughputs(vec![(
+                    ComponentKey::from(component_id.as_str()),
+                    tp.value as i64,
+                )]))
+                .await;
+        }
+    }
+}
+
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+async fn sent_events_totals(
+    mut client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Arc<[Pattern]>,
+) {
+    let Ok(mut stream) = client
+        .stream_component_metrics(MetricName::SentEventsTotal, interval as i32)
+        .await
+    else {
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        let component_id = &response.component_id;
+        if !component_matches_patterns(component_id, &components_patterns) {
+            continue;
+        }
+        if let Some(Value::Total(total)) = response.value {
+            _ = tx
+                .send(state::EventType::SentEventsTotals(vec![SentEventsMetric {
+                    key: ComponentKey::from(component_id.as_str()),
+                    total: total.value,
+                    outputs: total.output_totals.into_iter().collect(),
+                }]))
+                .await;
+        }
+    }
+}
+
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+async fn sent_events_throughputs(
+    mut client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Arc<[Pattern]>,
+) {
+    let Ok(mut stream) = client
+        .stream_component_metrics(MetricName::SentEventsThroughput, interval as i32)
+        .await
+    else {
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        let component_id = &response.component_id;
+        if !component_matches_patterns(component_id, &components_patterns) {
+            continue;
+        }
+        if let Some(Value::Throughput(tp)) = response.value {
+            _ = tx
+                .send(state::EventType::SentEventsThroughputs(vec![
+                    SentEventsMetric {
+                        key: ComponentKey::from(component_id.as_str()),
+                        total: tp.value as i64,
+                        outputs: tp
+                            .output_throughputs
+                            .into_iter()
+                            .map(|(k, v)| (k, v as i64))
+                            .collect(),
+                    },
+                ]))
+                .await;
+        }
+    }
+}
+
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+async fn errors_totals(
+    mut client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Arc<[Pattern]>,
+) {
+    let Ok(mut stream) = client
+        .stream_component_metrics(MetricName::ErrorsTotal, interval as i32)
+        .await
+    else {
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        let component_id = &response.component_id;
+        if !component_matches_patterns(component_id, &components_patterns) {
+            continue;
+        }
+        if let Some(Value::Total(total)) = response.value {
+            _ = tx
+                .send(state::EventType::ErrorsTotals(vec![(
+                    ComponentKey::from(component_id.as_str()),
+                    total.value,
+                )]))
+                .await;
+        }
+    }
+}
+
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Preserve the existing metric interval and throughput conversions."
+)]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "Keep the existing approximate display of large metric values."
+)]
+async fn uptime_changed(mut client: Client, tx: state::EventTx, interval: i64) {
+    let Ok(mut stream) = client.stream_uptime(interval as i32).await else {
+        return;
+    };
+
+    while let Some(Ok(response)) = stream.next().await {
+        _ = tx
+            .send(state::EventType::UptimeChanged(
+                response.uptime_seconds as f64,
+            ))
+            .await;
+    }
+}
+
+/// Handles returned by [`subscribe`], split by lifecycle.
+pub struct SubscribeHandles {
+    /// Metric stream tasks — exit when a gRPC stream closes or errors.
+    /// `cmd.rs` joins these to detect connection loss and trigger reconnection.
+    pub metric_handles: Vec<JoinHandle<()>>,
+    /// Polls `get_components` for topology changes. Designed to run indefinitely
+    /// while the server is healthy, so it must be aborted separately rather than
+    /// joined alongside the metric handles.
+    pub poll_handle: JoinHandle<()>,
+}
+
+/// Subscribe to each metrics stream, all sharing the connection of `client`.
+/// HTTP/2 multiplexes the concurrent streams — cloning a `Client` is cheap (clones share
+/// one connection pool) and avoids redundant TCP/HTTP2 handshakes.
+///
+/// Pass the client that [`init_components`] used, so the streams reuse the connection that its
+/// RPCs opened. A stream that fails, for example because the API is unreachable, ends its task.
+// https://github.com/vectordotdev/vector/issues/23659
+#[allow(
+    clippy::implicit_hasher,
+    reason = "Keep the concrete set type used by the component polling task."
+)]
+pub fn subscribe(
+    client: Client,
+    tx: state::EventTx,
+    interval: i64,
+    components_patterns: Vec<Pattern>,
+    initial_components: HashSet<String>,
+) -> SubscribeHandles {
+    let components_patterns = Arc::from(components_patterns);
+
+    let poll_handle = tokio::spawn(poll_components(
+        client.clone(),
+        tx.clone(),
+        interval,
+        Arc::clone(&components_patterns),
+        initial_components,
+    ));
+
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut metric_handles = vec![
+        tokio::spawn(received_bytes_totals(
+            client.clone(),
+            tx.clone(),
+            interval,
+            Arc::clone(&components_patterns),
+        )),
+        tokio::spawn(received_bytes_throughputs(
+            client.clone(),
+            tx.clone(),
+            interval,
+            Arc::clone(&components_patterns),
+        )),
+        tokio::spawn(received_events_totals(
+            client.clone(),
+            tx.clone(),
+            interval,
+            Arc::clone(&components_patterns),
+        )),
+        tokio::spawn(received_events_throughputs(
+            client.clone(),
+            tx.clone(),
+            interval,
+            Arc::clone(&components_patterns),
+        )),
+        tokio::spawn(sent_bytes_totals(
+            client.clone(),
+            tx.clone(),
+            interval,
+            Arc::clone(&components_patterns),
+        )),
+        tokio::spawn(sent_bytes_throughputs(
+            client.clone(),
+            tx.clone(),
+            interval,
+            Arc::clone(&components_patterns),
+        )),
+        tokio::spawn(sent_events_totals(
+            client.clone(),
+            tx.clone(),
+            interval,
+            Arc::clone(&components_patterns),
+        )),
+        tokio::spawn(sent_events_throughputs(
+            client.clone(),
+            tx.clone(),
+            interval,
+            Arc::clone(&components_patterns),
+        )),
+        tokio::spawn(errors_totals(
+            client.clone(),
+            tx.clone(),
+            interval,
+            Arc::clone(&components_patterns),
+        )),
+        tokio::spawn(uptime_changed(client.clone(), tx.clone(), interval)),
+    ];
+
+    #[cfg(unix)]
+    metric_handles.push(tokio::spawn(allocated_bytes(
+        client,
+        tx,
+        interval,
+        Arc::clone(&components_patterns),
+    )));
+
+    SubscribeHandles {
+        metric_handles,
+        poll_handle,
+    }
+}
+
+/// Retrieve the initial components/metrics for first paint. Further updating the metrics
+/// will be handled by subscriptions.
+///
+/// `client` must be connected. Its RPCs open the connection, so success means the API is
+/// reachable.
+///
+/// # Errors
+/// Returns an error if fetching the initial component list fails.
+pub async fn init_components(
+    client: &mut Client,
+    components_patterns: &[Pattern],
+) -> Result<state::State, vector_api_client::Error> {
+    // Get all components
+    let response = client.get_components(0).await?;
+
+    let rows = response
+        .components
+        .into_iter()
+        .filter(|component| {
+            component_matches_patterns(&component.component_id, components_patterns)
+        })
+        .map(|component| {
+            let row = component_to_row(&component);
+            (row.key.clone(), row)
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    // GetCapabilities is a one-shot call made once per connection to learn allocation
+    // tracing status and the full set of registered metric names. Re-evaluated on every
+    // reconnect via the retry loop in `subscription()`.
+    // On older servers that don't implement GetCapabilities, fall back to the legacy
+    // GetAllocationTracingStatus RPC for the allocation tracing flag and use the
+    // compiled-in metric names as the available metrics list.
+    let (allocation_tracing_enabled, available_metrics) =
+        if let Ok(caps) = client.get_capabilities().await {
+            let metrics = caps
+                .available_metrics
+                .into_iter()
+                .filter_map(|m| {
+                    let kind = match InternalMetricKind::try_from(m.kind) {
+                        Ok(InternalMetricKind::Counter) => state::InternalMetricKind::Counter,
+                        Ok(InternalMetricKind::Gauge) => state::InternalMetricKind::Gauge,
+                        Ok(InternalMetricKind::Histogram) => state::InternalMetricKind::Histogram,
+                        _ => return None,
+                    };
+                    Some(state::MetricInfo { name: m.name, kind })
+                })
+                .collect();
+            (caps.allocation_tracing_enabled, metrics)
+        } else {
+            let enabled = client
+                .get_allocation_tracing_status()
+                .await
+                .is_ok_and(|r| r.enabled);
+            let metrics = all_metrics()
+                .map(|(name, kind)| state::MetricInfo {
+                    name: name.to_string(),
+                    kind,
+                })
+                .collect();
+            (enabled, metrics)
+        };
+
+    let mut state = state::State::new(rows);
+    state.available_metrics = available_metrics;
+
+    #[cfg(unix)]
+    {
+        state.allocation_tracing_active = allocation_tracing_enabled;
+    }
+
+    #[cfg(not(unix))]
+    let _ = allocation_tracing_enabled;
+
+    Ok(state)
+}

@@ -38,10 +38,11 @@ sinks:
     inputs: ["parse_logs"]
     encoding:
       codec: "json"
+      json:
+        pretty: true
 
-# Vector's GraphQL API (disabled by default)
-# Uncomment to try it out with the `vector top` command or
-# in your browser at http://localhost:8686
+# Vector's API (disabled by default)
+# Uncomment to try it out with the `vector top` command
 # api:
 #   enabled: true
 #   address: "127.0.0.1:8686"

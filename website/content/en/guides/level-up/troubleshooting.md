@@ -1,7 +1,8 @@
 ---
+date: "2021-08-12"
 title: Troubleshooting
 description: A guide to debugging and troubleshooting Vector
-author_github: binarylogic
+authors: ["binarylogic"]
 domain: operations
 weight: 4
 tags: ["troubleshooting", "level up", "guides", "guide"]
@@ -118,8 +119,8 @@ At this point, we recommend reaching out to the community for help.
 
 3. If you need help, [join our chat community][urls.vector_chat]. You can post a question and search previous questions.
 
-[urls.new_bug_report]: https://github.com/vectordotdev/vector/issues/new?assignees=&labels=type%3A+bug&template=bug.yml
-[urls.new_feature_request]: https://github.com/vectordotdev/vector/issues/new?assignees=&labels=type%3A+feature&template=feature.yml
+[urls.new_bug_report]: https://github.com/vectordotdev/vector/issues/new?template=bug.yml
+[urls.new_feature_request]: https://github.com/vectordotdev/vector/issues/new?template=feature.yml
 [urls.vector_chat]: https://chat.vector.dev
 [urls.vector_issues]: https://github.com/vectordotdev/vector/issues
 [Vector tap]: /guides/level-up/vector-tap-guide

@@ -4,8 +4,7 @@ components: sources: prometheus_remote_write: {
 	title: "Prometheus Remote Write"
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["daemon", "sidecar"]
 		development:   "beta"
 		egress_method: "batch"
@@ -14,6 +13,7 @@ components: sources: prometheus_remote_write: {
 
 	features: {
 		auto_generated:   true
+		has_auth:         true
 		acknowledgements: true
 		multiline: enabled: false
 		receive: {
@@ -42,14 +42,13 @@ components: sources: prometheus_remote_write: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.prometheus_remote_write.configuration
+	configuration: generated.components.sources.prometheus_remote_write.configuration
 
 	output: metrics: {
 		counter: output._passthrough_counter

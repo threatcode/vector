@@ -1,41 +1,31 @@
 use std::convert::Infallible;
 
 use bytes::BytesMut;
-use snafu::Snafu;
 use tokio_util::codec::Encoder;
-use vector_lib::request_metadata::RequestMetadata;
 use vector_lib::{
+    EstimatedJsonEncodedSizeOf,
     config::telemetry,
     event::{EventFinalizers, Finalizable, Metric},
-    EstimatedJsonEncodedSizeOf,
+    request_metadata::RequestMetadata,
 };
 
 use super::{encoder::StatsdEncoder, service::StatsdRequest};
 use crate::{
     internal_events::SocketMode,
     sinks::util::{
-        metadata::RequestMetadataBuilder, request_builder::EncodeResult, IncrementalRequestBuilder,
+        IncrementalRequestBuilder, metadata::RequestMetadataBuilder, request_builder::EncodeResult,
     },
 };
 
-#[derive(Debug, Snafu)]
-pub enum RequestBuilderError {
-    #[snafu(display("Failed to build the request builder: {}", reason))]
-    FailedToBuild { reason: &'static str },
-}
-
-/// Incremental request builder specific to StatsD.
-pub struct StatsdRequestBuilder {
+/// Incremental request builder specific to `StatsD`.
+pub(super) struct StatsdRequestBuilder {
     encoder: StatsdEncoder,
     request_max_size: usize,
     encode_buf: BytesMut,
 }
 
 impl StatsdRequestBuilder {
-    pub fn new(
-        default_namespace: Option<String>,
-        socket_mode: SocketMode,
-    ) -> Result<Self, RequestBuilderError> {
+    pub(super) fn new(default_namespace: Option<String>, socket_mode: SocketMode) -> Self {
         let encoder = StatsdEncoder::new(default_namespace);
         let request_max_size = match socket_mode {
             // Following the recommended advice [1], we use a datagram size that should reasonably
@@ -50,7 +40,7 @@ impl StatsdRequestBuilder {
             SocketMode::Tcp | SocketMode::Unix => 8192,
         };
 
-        Ok(Self::from_encoder_and_max_size(encoder, request_max_size))
+        Self::from_encoder_and_max_size(encoder, request_max_size)
     }
 
     fn from_encoder_and_max_size(encoder: StatsdEncoder, request_max_size: usize) -> Self {
@@ -132,7 +122,7 @@ impl IncrementalRequestBuilder<Vec<Metric>> for StatsdRequestBuilder {
                 // finalizers, etc.
                 request_buf.extend(&self.encode_buf[..]);
                 finalizers.merge(metric.take_finalizers());
-                request_metadata_builder.track_event(metric);
+                request_metadata_builder.track_event(&metric);
                 n += 1;
             }
 

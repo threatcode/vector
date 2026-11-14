@@ -4,7 +4,6 @@ components: sinks: elasticsearch: {
 	title: "Elasticsearch"
 
 	classes: {
-		commonly_used: true
 		delivery:      "at_least_once"
 		development:   "stable"
 		egress_method: "batch"
@@ -19,7 +18,6 @@ components: sinks: elasticsearch: {
 		send: {
 			batch: {
 				enabled:      true
-				common:       false
 				max_bytes:    10_000_000
 				timeout_secs: 1.0
 			}
@@ -71,15 +69,21 @@ components: sinks: elasticsearch: {
 				"""#,
 		]
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.sinks.elasticsearch.configuration
+	configuration: generated.components.sinks.elasticsearch.configuration
 
 	input: {
-		logs:    true
-		metrics: null
-		traces:  false
+		logs: true
+		metrics: {
+			counter:      true
+			distribution: true
+			gauge:        true
+			histogram:    true
+			set:          true
+			summary:      true
+		}
+		traces: false
 	}
 
 	how_it_works: {
@@ -91,6 +95,9 @@ components: sinks: elasticsearch: {
 				inserted via the `index` action, which replaces documents if an existing
 				one has the same `id`. If `bulk.action` is configured with `create`, Elasticsearch
 				does _not_ replace an existing document and instead returns a conflict error.
+				When `bulk.action` is set to `update`, the document is updated with several constraints.
+				The message must be added in `.doc` and have `.doc_as_upsert` to true.
+				The `update` operation requires the `id_key` to be set, and the `encoding` field should specify `doc` and `doc_as_upsert` as values.
 				"""
 		}
 
@@ -129,6 +136,52 @@ components: sinks: elasticsearch: {
 
 				By default, partial failures are not retried. To enable retries, set `request_retry_partial`. Once enabled it will
 				retry whole partially failed requests. As such it is advised to use `id_key` to avoid duplicates.
+				"""
+		}
+
+		query_params_structure: {
+			title: "Query params structure"
+			body: """
+				Query params can either be single key value pair or a key with multiple values
+
+				```yaml
+				sources:
+					source0:
+						query:
+							field: value
+							fruit:
+								- mango
+								- papaya
+								- kiwi
+				```
+				"""
+		}
+
+		opensearch_compatibility: {
+			title: "OpenSearch Compatibility"
+			body: """
+				This sink is fully compatible with OpenSearch, which is an open-source fork of Elasticsearch.
+				Vector can connect to:
+
+				- **Self-managed OpenSearch**: Use the same configuration as Elasticsearch with `opensearch_service_type = "managed"` (default)
+				- **Amazon OpenSearch Service**: Configure AWS authentication and set `opensearch_service_type = "managed"`
+				- **Amazon OpenSearch Serverless**: Set `opensearch_service_type = "serverless"` and use AWS authentication
+
+				All Elasticsearch sink features are supported with OpenSearch, including:
+				- Bulk indexing and data streams
+				- Authentication (Basic, AWS)
+				- TLS/SSL encryption
+				- Automatic API version detection
+				- Compression and custom headers
+
+				Example configuration for OpenSearch:
+				```toml
+				[sinks.opensearch]
+				type = "elasticsearch"
+				endpoints = ["https://opensearch.example.com:9200"]
+				opensearch_service_type = "managed"
+				# ... other configuration options
+				```
 				"""
 		}
 

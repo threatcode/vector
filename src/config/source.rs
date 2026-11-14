@@ -1,13 +1,13 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, time::Duration};
 
 use async_trait::async_trait;
 use dyn_clone::DynClone;
-use vector_lib::configurable::attributes::CustomAttribute;
-use vector_lib::configurable::schema::{SchemaGenerator, SchemaObject};
-use vector_lib::configurable::{
-    configurable_component, Configurable, GenerateError, Metadata, NamedComponent,
+use vector_config::{Configurable, GenerateError, Metadata, NamedComponent};
+use vector_config_common::{
+    attributes::CustomAttribute,
+    schema::{SchemaGenerator, SchemaObject},
 };
+use vector_config_macros::configurable_component;
 use vector_lib::{
     config::{
         AcknowledgementsConfig, GlobalOptions, LogNamespace, SourceAcknowledgementsConfig,
@@ -15,9 +15,12 @@ use vector_lib::{
     },
     source::Source,
 };
+use vector_vrl_metrics::MetricsStorage;
 
-use super::{schema, ComponentKey, ProxyConfig, Resource};
-use crate::{extra_context::ExtraContext, shutdown::ShutdownSignal, SourceSender};
+use super::{ComponentKey, ProxyConfig, Resource, dot_graph::GraphConfig, schema};
+use vector_lib::extra_context::ExtraContext;
+
+use crate::{SourceSender, shutdown::ShutdownSignal};
 
 pub type BoxedSource = Box<dyn SourceConfig>;
 
@@ -34,8 +37,10 @@ impl Configurable for BoxedSource {
         metadata
     }
 
-    fn generate_schema(gen: &RefCell<SchemaGenerator>) -> Result<SchemaObject, GenerateError> {
-        vector_lib::configurable::component::SourceDescription::generate_schemas(gen)
+    fn generate_schema(
+        generator: &RefCell<SchemaGenerator>,
+    ) -> Result<SchemaObject, GenerateError> {
+        vector_lib::configurable::component::SourceDescription::generate_schemas(generator)
     }
 }
 
@@ -47,12 +52,13 @@ impl<T: SourceConfig + 'static> From<T> for BoxedSource {
 
 /// Fully resolved source component.
 #[configurable_component]
-#[configurable(metadata(docs::component_base_type = "source"))]
 #[derive(Clone, Debug)]
 pub struct SourceOuter {
-    #[configurable(derived)]
     #[serde(default, skip_serializing_if = "vector_lib::serde::is_default")]
     pub proxy: ProxyConfig,
+
+    #[serde(default, skip_serializing_if = "vector_lib::serde::is_default")]
+    pub graph: GraphConfig,
 
     #[serde(default, skip)]
     pub sink_acknowledgements: bool,
@@ -65,7 +71,8 @@ pub struct SourceOuter {
 impl SourceOuter {
     pub(crate) fn new<I: Into<BoxedSource>>(inner: I) -> Self {
         Self {
-            proxy: Default::default(),
+            proxy: ProxyConfig::default(),
+            graph: GraphConfig::default(),
             sink_acknowledgements: false,
             inner: inner.into(),
         }
@@ -113,6 +120,12 @@ pub trait SourceConfig: DynClone + NamedComponent + core::fmt::Debug + Send + Sy
     /// well as emit contextual warnings when end-to-end acknowledgements are enabled, but the
     /// topology as configured does not actually support the use of end-to-end acknowledgements.
     fn can_acknowledge(&self) -> bool;
+
+    /// If this source supports timeout returns from the `SourceSender` and the configuration
+    /// provides a timeout value, return it here and the `out` channel will be configured with it.
+    fn send_timeout(&self) -> Option<Duration> {
+        None
+    }
 }
 
 dyn_clone::clone_trait_object!(SourceConfig);
@@ -120,6 +133,8 @@ dyn_clone::clone_trait_object!(SourceConfig);
 pub struct SourceContext {
     pub key: ComponentKey,
     pub globals: GlobalOptions,
+    pub enrichment_tables: vector_lib::enrichment::TableRegistry,
+    pub metrics_storage: MetricsStorage,
     pub shutdown: ShutdownSignal,
     pub out: SourceSender,
     pub proxy: ProxyConfig,
@@ -139,6 +154,12 @@ pub struct SourceContext {
 
 impl SourceContext {
     #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    // https://github.com/vectordotdev/vector/issues/23659
+    #[allow(
+        clippy::default_trait_access,
+        reason = "Preserve inferred default types"
+    )]
     pub fn new_shutdown(
         key: &ComponentKey,
         out: SourceSender,
@@ -149,19 +170,27 @@ impl SourceContext {
             Self {
                 key: key.clone(),
                 globals: GlobalOptions::default(),
+                enrichment_tables: Default::default(),
+                metrics_storage: MetricsStorage::default(),
                 shutdown: shutdown_signal,
                 out,
-                proxy: Default::default(),
+                proxy: ProxyConfig::default(),
                 acknowledgements: false,
                 schema_definitions: HashMap::default(),
                 schema: Default::default(),
-                extra_context: Default::default(),
+                extra_context: ExtraContext::default(),
             },
             shutdown,
         )
     }
 
     #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    // https://github.com/vectordotdev/vector/issues/23659
+    #[allow(
+        clippy::default_trait_access,
+        reason = "Preserve inferred default types"
+    )]
     pub fn new_test(
         out: SourceSender,
         schema_definitions: Option<HashMap<Option<String>, schema::Definition>>,
@@ -169,13 +198,15 @@ impl SourceContext {
         Self {
             key: ComponentKey::from("default"),
             globals: GlobalOptions::default(),
+            enrichment_tables: Default::default(),
+            metrics_storage: MetricsStorage::default(),
             shutdown: ShutdownSignal::noop(),
             out,
-            proxy: Default::default(),
+            proxy: ProxyConfig::default(),
             acknowledgements: false,
             schema_definitions: schema_definitions.unwrap_or_default(),
             schema: Default::default(),
-            extra_context: Default::default(),
+            extra_context: ExtraContext::default(),
         }
     }
 
@@ -196,6 +227,7 @@ impl SourceContext {
 
     /// Gets the log namespacing to use. The passed in value is from the source itself
     /// and will override any global default if it's set.
+    #[must_use]
     pub fn log_namespace(&self, namespace: Option<bool>) -> LogNamespace {
         namespace
             .or(self.schema.log_namespace)

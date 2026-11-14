@@ -4,7 +4,6 @@ components: sinks: mqtt: {
 	title: "MQTT"
 
 	classes: {
-		commonly_used: false
 		delivery:      "best_effort"
 		development:   "beta"
 		egress_method: "stream"
@@ -52,17 +51,17 @@ components: sinks: mqtt: {
 			"aarch64-unknown-linux-musl":     true
 			"armv7-unknown-linux-gnueabihf":  true
 			"armv7-unknown-linux-musleabihf": true
-			"x86_64-apple-darwin":            true
 			"x86_64-pc-windows-msv":          true
 			"x86_64-unknown-linux-gnu":       true
 			"x86_64-unknown-linux-musl":      true
 		}
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.sinks.mqtt.configuration
+	configuration: generated.components.sinks.mqtt.configuration & {
+		topic: type: string: examples: ["my-topic"]
+	}
 
 	input: {
 		logs:    true

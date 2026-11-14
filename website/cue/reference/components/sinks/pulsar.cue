@@ -4,7 +4,6 @@ components: sinks: pulsar: {
 	title: "Apache Pulsar"
 
 	classes: {
-		commonly_used: false
 		delivery:      "at_least_once"
 		development:   "stable"
 		egress_method: "stream"
@@ -53,14 +52,20 @@ components: sinks: pulsar: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.sinks.pulsar.configuration
+	configuration: generated.components.sinks.pulsar.configuration
 
 	input: {
-		logs:    true
-		metrics: null
-		traces:  false
+		logs: true
+		metrics: {
+			counter:      true
+			distribution: true
+			gauge:        true
+			histogram:    true
+			set:          true
+			summary:      true
+		}
+		traces: false
 	}
 }

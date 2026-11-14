@@ -1,12 +1,12 @@
 use std::task::{Context, Poll};
 
-use crate::sinks::prelude::*;
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use rumqttc::{AsyncClient, ClientError};
+use rumqttc::{AsyncClient, ClientError, PublishOptions};
 use snafu::Snafu;
 
 use super::config::MqttQoS;
+use crate::sinks::prelude::*;
 
 pub(super) struct MqttResponse {
     byte_size: usize,
@@ -53,6 +53,7 @@ impl MetaDescriptive for MqttRequest {
 pub(super) struct MqttService {
     pub(super) client: AsyncClient,
     pub(super) quality_of_service: MqttQoS,
+    pub(super) retain: bool,
 }
 
 #[derive(Debug, Snafu)]
@@ -72,13 +73,18 @@ impl Service<MqttRequest> for MqttService {
 
     fn call(&mut self, req: MqttRequest) -> Self::Future {
         let quality_of_service = self.quality_of_service;
+        let retain = self.retain;
         let client = self.client.clone();
 
         Box::pin(async move {
             let byte_size = req.body.len();
 
             let res = client
-                .publish(&req.topic, quality_of_service.into(), false, req.body)
+                .publish(
+                    req.topic,
+                    req.body,
+                    PublishOptions::new(quality_of_service.into()).retain(retain),
+                )
                 .await;
             match res {
                 Ok(()) => Ok(MqttResponse {

@@ -9,7 +9,6 @@ components: transforms: metric_to_log: {
 		"""
 
 	classes: {
-		commonly_used: true
 		development:   "stable"
 		egress_method: "stream"
 		stateful:      false
@@ -22,10 +21,9 @@ components: transforms: metric_to_log: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.transforms.metric_to_log.configuration
+	configuration: generated.components.transforms.metric_to_log.configuration
 
 	input: {
 		logs: false
@@ -38,6 +36,12 @@ components: transforms: metric_to_log: {
 			summary:      true
 		}
 		traces: false
+	}
+
+	output: {
+		logs: "": {
+			description: "The converted `log` event."
+		}
 	}
 
 	examples: [

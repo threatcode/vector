@@ -1,6 +1,7 @@
+use std::time::Duration;
+
 use async_stream::stream;
 use futures::{Stream, StreamExt};
-use std::time::Duration;
 
 #[derive(Default)]
 pub struct Emitter<T> {
@@ -8,6 +9,7 @@ pub struct Emitter<T> {
 }
 
 impl<T> Emitter<T> {
+    #[must_use]
     pub fn new() -> Self {
         Self { values: vec![] }
     }

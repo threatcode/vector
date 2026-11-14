@@ -3,59 +3,54 @@
 # Validates that each component feature compiles
 #
 # Runs on:
-#  - scheduled UTC midnight Tues-Sat
-#  - on PR comment (see comment-trigger.yml)
+#  - scheduled 10:00 UTC Monday (6 AM EST / 5 AM EDT NYC)
+#  - on PR review (see comment-trigger.yml)
 #  - on demand from github actions UI
 
 name: Component Features - Linux
 
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to checkout"
+        required: false
+        type: string
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to checkout"
+        required: false
+        type: string
   schedule:
-    # At midnight UTC Tue-Sat
-    - cron: '0 0 * * 2-6'
+    - cron: "0 10 * * 1" # 10:00 UTC Monday (6 AM EST NYC)
+
+permissions:
+  contents: read
 
 jobs:
   check-component-features:
+    if: github.repository == 'vectordotdev/vector'
     # use free tier on schedule and 8 core to expedite results on demand invocation
-    runs-on: ${{ github.event_name == 'schedule' && 'ubuntu-latest' || fromJSON('["linux", "ubuntu-20.04-8core"]') }}
-    if: github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ${{ github.event_name == 'schedule' && 'ubuntu-24.04' || 'ubuntu-24.04-8core' }}
+    timeout-minutes: 180 # Usually takes 2h but this prevents it from hanging for an indefinite time
     steps:
-      - name: (PR comment) Get PR branch
-        if: github.event_name == 'issue_comment'
-        uses: xt0rted/pull-request-comment-branch@v2
-        id: comment-branch
-
-      - name: (PR comment) Set latest commit status as pending
-        if: github.event_name == 'issue_comment'
-        uses: myrotvorets/set-commit-status-action@v2.0.1
-        with:
-          sha: ${{ steps.comment-branch.outputs.head_sha }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          context: Component Features - Linux
-          status: pending
-
-      - name: (PR comment) Checkout PR branch
-        if: github.event_name == 'issue_comment'
-        uses: actions/checkout@v3
-        with:
-          ref: ${{ steps.comment-branch.outputs.head_ref }}
-
       - name: Checkout branch
-        if: github.event_name != 'issue_comment'
-        uses: actions/checkout@v3
-
-      - run: sudo -E bash scripts/environment/bootstrap-ubuntu-20.04.sh
-      - run: bash scripts/environment/prepare.sh
-      - run: echo "::add-matcher::.github/matchers/rust.json"
-      - run: make check-component-features
-
-      - name: (PR comment) Set latest commit status as ${{ job.status }}
-        if: always() && github.event_name == 'issue_comment'
-        uses: myrotvorets/set-commit-status-action@v2.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sha: ${{ steps.comment-branch.outputs.head_sha }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          context: Component Features - Linux
-          status: ${{ job.status }}
+          ref: ${{ inputs.ref }}
+
+      - name: Free disk space
+        shell: bash
+        run: sudo -E bash scripts/ci-free-disk-space.sh
+
+      - uses: ./.github/actions/setup
+        with:
+          rust: true
+          cargo-nextest: true
+          protoc: true
+          libsasl2: true
+          cargo-hack: true
+          cargo-cache: true
+
+      - run: make check-component-features

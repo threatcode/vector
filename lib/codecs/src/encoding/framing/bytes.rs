@@ -10,13 +10,15 @@ pub struct BytesEncoderConfig;
 
 impl BytesEncoderConfig {
     /// Creates a `BytesEncoderConfig`.
+    #[must_use]
     pub const fn new() -> Self {
         Self
     }
 
     /// Build the `BytesEncoder` from this configuration.
-    pub const fn build(&self) -> BytesEncoder {
-        BytesEncoder::new()
+    #[must_use]
+    pub fn build(&self) -> BytesEncoder {
+        BytesEncoder
     }
 }
 
@@ -30,9 +32,9 @@ impl BytesEncoderConfig {
 #[derive(Debug, Clone)]
 pub struct BytesEncoder;
 
-impl BytesEncoder {
+impl Default for BytesEncoderConfig {
     /// Creates a `BytesEncoder`.
-    pub const fn new() -> Self {
+    fn default() -> Self {
         Self
     }
 }
@@ -40,7 +42,7 @@ impl BytesEncoder {
 impl Encoder<()> for BytesEncoder {
     type Error = BoxedFramingError;
 
-    fn encode(&mut self, _: (), _: &mut BytesMut) -> Result<(), BoxedFramingError> {
+    fn encode(&mut self, (): (), _: &mut BytesMut) -> Result<(), BoxedFramingError> {
         Ok(())
     }
 }
@@ -51,7 +53,7 @@ mod tests {
 
     #[test]
     fn encode() {
-        let mut codec = BytesEncoder::new();
+        let mut codec = BytesEncoder;
 
         let mut buffer = BytesMut::from("abc");
         codec.encode((), &mut buffer).unwrap();

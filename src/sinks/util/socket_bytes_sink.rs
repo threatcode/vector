@@ -1,8 +1,8 @@
 use std::{
-    io::{Error as IoError, ErrorKind},
+    io::Error as IoError,
     marker::Unpin,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::Bytes;
@@ -12,6 +12,7 @@ use tokio::io::AsyncWrite;
 use tokio_util::codec::{BytesCodec, FramedWrite};
 use vector_lib::{
     finalization::{EventFinalizers, EventStatus},
+    internal_event::emit,
     json_size::JsonSize,
 };
 
@@ -83,12 +84,12 @@ impl State {
             }
 
             if status == EventStatus::Delivered {
-                emit!(SocketEventsSent {
+                emit(SocketEventsSent {
                     mode: self.socket_mode,
                     count: self.events_total as u64,
                     byte_size: self.event_bytes,
                 });
-                emit!(SocketBytesSent {
+                emit(SocketBytesSent {
                     mode: self.socket_mode,
                     byte_size: self.bytes_total,
                 });
@@ -107,7 +108,7 @@ where
     T: AsyncWrite + Unpin,
 {
     fn drop(self: Pin<&mut Self>) {
-        self.get_mut().state.ack(EventStatus::Dropped)
+        self.get_mut().state.ack(EventStatus::Dropped);
     }
 }
 
@@ -118,10 +119,10 @@ where
     type Error = <FramedWrite<T, BytesCodec> as Sink<Bytes>>::Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.as_mut().project().state.events_total >= MAX_PENDING_ITEMS {
-            if let Err(error) = ready!(self.as_mut().poll_flush(cx)) {
-                return Poll::Ready(Err(error));
-            }
+        if self.as_mut().project().state.events_total >= MAX_PENDING_ITEMS
+            && let Err(error) = ready!(self.as_mut().poll_flush(cx))
+        {
+            return Poll::Ready(Err(error));
         }
 
         let inner = self.project().inner;
@@ -151,7 +152,7 @@ where
                     return Poll::Ready(Err(error));
                 }
 
-                return Poll::Ready(Err(IoError::new(ErrorKind::Other, reason)));
+                return Poll::Ready(Err(IoError::other(reason)));
             }
             ShutdownCheck::Alive => {}
         }
@@ -161,7 +162,7 @@ where
             inner, cx
         ));
         self.as_mut().get_mut().state.ack(match result {
-            Ok(_) => EventStatus::Delivered,
+            Ok(()) => EventStatus::Delivered,
             Err(_) => EventStatus::Errored,
         });
         Poll::Ready(result)

@@ -2,25 +2,27 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use snafu::{OptionExt, ResultExt, Snafu};
-use vector_lib::config::{LegacyKey, LogNamespace};
-use vector_lib::lookup::{self, path, OwnedTargetPath};
+use vector_lib::{
+    config::{LegacyKey, LogNamespace},
+    internal_event::emit,
+    lookup::{self, OwnedTargetPath, path},
+};
 
-use crate::sources::kubernetes_logs::transform_utils::get_message_path;
 use crate::{
     config::log_schema,
     event::{self, Event, LogEvent, Value},
     internal_events::KubernetesLogsDockerFormatParseError,
-    sources::kubernetes_logs::Config,
+    sources::kubernetes_logs::{Config, transform_utils::get_message_path},
     transforms::{FunctionTransform, OutputBuffer},
 };
 
-pub const MESSAGE_KEY: &str = "log";
-pub const STREAM_KEY: &str = "stream";
-pub const TIMESTAMP_KEY: &str = "time";
+pub(super) const MESSAGE_KEY: &str = "log";
+pub(super) const STREAM_KEY: &str = "stream";
+pub(super) const TIMESTAMP_KEY: &str = "time";
 
 /// Parser for the Docker log format.
 ///
-/// Expects logs to arrive in a JSONLines format with the fields names and
+/// Expects logs to arrive in a `JSONLines` format with the fields names and
 /// contents specific to the implementation of the Docker `json-file` log driver.
 ///
 /// Normalizes parsed data for consistency.
@@ -30,7 +32,7 @@ pub(super) struct Docker {
 }
 
 impl Docker {
-    pub const fn new(log_namespace: LogNamespace) -> Self {
+    pub(super) const fn new(log_namespace: LogNamespace) -> Self {
         Self { log_namespace }
     }
 }
@@ -39,11 +41,11 @@ impl FunctionTransform for Docker {
     fn transform(&mut self, output: &mut OutputBuffer, mut event: Event) {
         let log = event.as_mut_log();
         if let Err(err) = parse_json(log, self.log_namespace) {
-            emit!(KubernetesLogsDockerFormatParseError { error: &err });
+            emit(KubernetesLogsDockerFormatParseError { error: &err });
             return;
         }
         if let Err(err) = normalize_event(log, self.log_namespace) {
-            emit!(KubernetesLogsDockerFormatParseError { error: &err });
+            emit(KubernetesLogsDockerFormatParseError { error: &err });
             return;
         }
         output.push(event);
@@ -60,6 +62,7 @@ fn parse_json(log: &mut LogEvent, log_namespace: LogNamespace) -> Result<(), Par
 
     let bytes = match value {
         Value::Bytes(bytes) => bytes,
+        Value::String(string) => string.into_bytes(),
         _ => return Err(ParsingError::MessageFieldNotInBytes),
     };
 
@@ -83,7 +86,7 @@ fn parse_json(log: &mut LogEvent, log_namespace: LogNamespace) -> Result<(), Par
                         value,
                     ),
                     _ => unreachable!("all json-file keys should be matched"),
-                };
+                }
             }
             Ok(())
         }
@@ -114,13 +117,10 @@ fn normalize_event(
 
     if let Some(timestamp_key) = timestamp_key {
         let time = log.remove(&timestamp_key).context(TimeFieldMissingSnafu)?;
-
-        let time = match time {
-            Value::Bytes(val) => val,
-            _ => return Err(NormalizationError::TimeValueUnexpectedType),
-        };
-        let time = DateTime::parse_from_rfc3339(String::from_utf8_lossy(time.as_ref()).as_ref())
-            .context(TimeParsingSnafu)?;
+        let time = time
+            .to_str_lossy()
+            .ok_or(NormalizationError::TimeValueUnexpectedType)?;
+        let time = DateTime::parse_from_rfc3339(time.as_ref()).context(TimeParsingSnafu)?;
         log_namespace.insert_source_metadata(
             Config::NAME,
             log,
@@ -135,6 +135,7 @@ fn normalize_event(
     let message = log.remove(&message_path).context(LogFieldMissingSnafu)?;
     let mut message = match message {
         Value::Bytes(val) => val,
+        Value::String(val) => val.into_bytes(),
         _ => return Err(NormalizationError::LogValueUnexpectedType),
     };
     // Here we apply out heuristics to detect if message is partial.
@@ -149,10 +150,10 @@ fn normalize_event(
     // an exception and make them non-partial.
     // This is still not ideal, and can potentially be improved.
     let mut is_partial = message.len() == DOCKER_MESSAGE_SPLIT_THRESHOLD;
-    if message.last().map(|&b| b as char == '\n').unwrap_or(false) {
+    if message.last().is_some_and(|&b| b as char == '\n') {
         message.truncate(message.len() - 1);
         is_partial = false;
-    };
+    }
     log.insert(&message_path, message);
 
     // For partial messages add a partial event indicator.
@@ -198,17 +199,18 @@ enum NormalizationError {
 }
 
 #[cfg(test)]
-pub mod tests {
+pub(super) mod tests {
+    use vrl::value;
+
     use super::{super::test_util, *};
     use crate::test_util::trace_init;
-    use vrl::value;
 
     fn make_long_string(base: &str, len: usize) -> String {
         base.chars().cycle().take(len).collect()
     }
 
     /// Shared test cases.
-    pub fn valid_cases(log_namespace: LogNamespace) -> Vec<(Bytes, Vec<Event>)> {
+    pub(crate) fn valid_cases(log_namespace: LogNamespace) -> Vec<(Bytes, Vec<Event>)> {
         vec![
             (
                 Bytes::from(
@@ -275,7 +277,7 @@ pub mod tests {
         ]
     }
 
-    pub fn invalid_cases() -> Vec<Bytes> {
+    pub(crate) fn invalid_cases() -> Vec<Bytes> {
         vec![
             // Empty string.
             Bytes::from(""),
@@ -342,7 +344,7 @@ pub mod tests {
             let mut output = OutputBuffer::default();
             parser.transform(&mut output, input.into());
 
-            assert!(output.is_empty(), "Expected no events: {:?}", output);
+            assert!(output.is_empty(), "Expected no events: {output:?}");
         }
     }
 
@@ -358,7 +360,7 @@ pub mod tests {
             let mut output = OutputBuffer::default();
             parser.transform(&mut output, input.into());
 
-            assert!(output.is_empty(), "Expected no events: {:?}", output);
+            assert!(output.is_empty(), "Expected no events: {output:?}");
         }
     }
 }

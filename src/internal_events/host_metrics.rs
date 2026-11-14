@@ -1,9 +1,10 @@
-use metrics::counter;
-use vector_lib::internal_event::InternalEvent;
-use vector_lib::internal_event::{error_stage, error_type};
+use vector_lib::{
+    NamedInternalEvent, counter,
+    internal_event::{CounterName, InternalEvent, error_stage, error_type},
+};
 
-#[derive(Debug)]
-pub struct HostMetricsScrapeError {
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct HostMetricsScrapeError {
     pub message: &'static str,
 }
 
@@ -13,19 +14,19 @@ impl InternalEvent for HostMetricsScrapeError {
             message = self.message,
             error_type = error_type::READER_FAILED,
             stage = error_stage::RECEIVING,
-            internal_log_rate_limit = true,
         );
 
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_type" => error_type::READER_FAILED,
             "stage" => error_stage::RECEIVING,
-        );
+        )
+        .increment(1);
     }
 }
 
-#[derive(Debug)]
-pub struct HostMetricsScrapeDetailError<E> {
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct HostMetricsScrapeDetailError<E> {
     pub message: &'static str,
     pub error: E,
 }
@@ -37,19 +38,19 @@ impl<E: std::fmt::Display> InternalEvent for HostMetricsScrapeDetailError<E> {
             error = %self.error,
             error_type = error_type::READER_FAILED,
             stage = error_stage::RECEIVING,
-            internal_log_rate_limit = true,
         );
 
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_type" => error_type::READER_FAILED,
             "stage" => error_stage::RECEIVING,
-        );
+        )
+        .increment(1);
     }
 }
 
-#[derive(Debug)]
-pub struct HostMetricsScrapeFilesystemError {
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct HostMetricsScrapeFilesystemError {
     pub message: &'static str,
     pub error: heim::Error,
     pub mount_point: String,
@@ -63,13 +64,13 @@ impl InternalEvent for HostMetricsScrapeFilesystemError {
             error = %self.error,
             error_type = error_type::READER_FAILED,
             stage = error_stage::RECEIVING,
-            internal_log_rate_limit = true,
         );
 
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_type" => error_type::READER_FAILED,
             "stage" => error_stage::RECEIVING,
-        );
+        )
+        .increment(1);
     }
 }

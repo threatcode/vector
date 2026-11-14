@@ -1,0 +1,105 @@
+use std::collections::{HashMap, HashSet};
+
+use aws_sdk_secretsmanager::{Client, config};
+use vector_lib::configurable::{component::GenerateConfig, configurable_component};
+
+use crate::{
+    aws::{AwsAuthentication, ClientBuilder, RegionOrEndpoint, create_client},
+    config::{ProxyConfig, SecretBackend},
+    signal,
+    tls::TlsConfig,
+};
+
+pub(crate) struct SecretsManagerClientBuilder;
+
+impl ClientBuilder for SecretsManagerClientBuilder {
+    type Client = Client;
+
+    fn build(&self, config: &aws_types::SdkConfig) -> Self::Client {
+        let config = config::Builder::from(config).build();
+        Client::from_conf(config)
+    }
+}
+
+/// Configuration for the `aws_secrets_manager` secrets backend.
+#[configurable_component(secrets("aws_secrets_manager"))]
+#[derive(Clone, Debug)]
+pub struct AwsSecretsManagerBackend {
+    /// ID of the secret to resolve.
+    pub secret_id: String,
+
+    #[serde(flatten)]
+    pub region: RegionOrEndpoint,
+
+    #[serde(default)]
+    pub auth: AwsAuthentication,
+
+    pub tls: Option<TlsConfig>,
+}
+
+impl GenerateConfig for AwsSecretsManagerBackend {
+    fn generate_config() -> serde_json::Value {
+        serde_json::to_value(AwsSecretsManagerBackend {
+            secret_id: String::from("secret-id"),
+            region: RegionOrEndpoint::default(),
+            auth: AwsAuthentication::default(),
+            tls: None,
+        })
+        .unwrap()
+    }
+}
+
+impl SecretBackend for AwsSecretsManagerBackend {
+    async fn retrieve(
+        &mut self,
+        secret_keys: HashSet<String>,
+        _: &mut signal::SignalRx,
+    ) -> crate::Result<HashMap<String, String>> {
+        let client = create_client::<SecretsManagerClientBuilder>(
+            &SecretsManagerClientBuilder {},
+            &self.auth,
+            self.region.region(),
+            self.region.endpoint(),
+            &ProxyConfig::default(),
+            self.tls.as_ref(),
+            None,
+        )
+        .await?;
+
+        let get_secret_value_response = client
+            .get_secret_value()
+            .secret_id(&self.secret_id)
+            .send()
+            .await?;
+
+        let secret_string = get_secret_value_response
+            .secret_string
+            .ok_or::<String>(format!(
+                "secret for secret-id '{}' could not be retrieved",
+                self.secret_id
+            ))?;
+
+        let output = serde_json::from_str::<HashMap<String, String>>(secret_string.as_str())?;
+
+        let mut secrets = HashMap::new();
+        for k in secret_keys {
+            if let Some(secret) = output.get(&k) {
+                if secret.is_empty() {
+                    return Err(format!(
+                        "value for key '{k}' in secret with id '{}' was empty",
+                        self.secret_id
+                    )
+                    .into());
+                }
+                secrets.insert(k, secret.clone());
+            } else {
+                return Err(format!(
+                    "key '{k}' in secret with id '{}' does not exist",
+                    self.secret_id
+                )
+                .into());
+            }
+        }
+        Ok(secrets)
+    }
+}

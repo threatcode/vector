@@ -9,8 +9,7 @@ components: sources: postgresql_metrics: {
 		"""
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["daemon", "sidecar"]
 		development:   "stable"
 		egress_method: "batch"
@@ -45,14 +44,13 @@ components: sources: postgresql_metrics: {
 		requirements: []
 
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.postgresql_metrics.configuration
+	configuration: generated.components.sources.postgresql_metrics.configuration
 
 	how_it_works: {
 		privileges: {

@@ -4,8 +4,7 @@ components: sources: journald: {
 	title: "Journald"
 
 	classes: {
-		commonly_used: true
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["daemon"]
 		development:   "stable"
 		egress_method: "batch"
@@ -31,7 +30,6 @@ components: sources: journald: {
 
 	support: {
 		targets: {
-			"x86_64-apple-darwin":   false
 			"x86_64-pc-windows-msv": false
 		}
 
@@ -42,14 +40,13 @@ components: sources: journald: {
 				""",
 		]
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.journald.configuration
+	configuration: generated.components.sources.journald.configuration
 
 	output: logs: {
 		event: {
@@ -74,7 +71,6 @@ components: sources: journald: {
 					description: "The time at which the event appeared in the journal."
 				}
 				"*": {
-					common:      false
 					description: "Any Journald field"
 					required:    false
 					type: string: {

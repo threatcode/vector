@@ -1,8 +1,9 @@
 ---
+date: "2022-02-25"
 title: Using Vector `tap`
 short: Vector tap
 description: Learn how to use the Vector `tap` CLI command to examine events as they flow through your pipeline and troubleshoot issues.
-author_github: https://github.com/001wwang
+authors: ["001wwang"]
 domain: operations
 weight: 6
 tags: ["cli", "tap", "level up", "guides", "guide"]
@@ -14,7 +15,7 @@ Before you begin, this guide assumes the following:
 * You understand the [basic Vector concepts][concepts]
 * You understand [how to set up a basic pipeline][pipeline]
 
-[concepts]: /docs/about/concepts
+[concepts]: /docs/introduction/concepts
 [pipeline]: /docs/setup/quickstart
 {{< /requirement >}}
 
@@ -26,31 +27,31 @@ up your troubleshooting experience.
 
 ## Getting Started
 
-To start, we'll reference the following base configuration, but feel free to
-substitute your own. Just note that the [Vector API] must be enabled for `vector
-tap` to work. See [under the hood](#under-the-hood) for more details.
+`vector tap` requires the [Vector API], which is disabled by default and has no authentication.
+[Enable the API](/docs/reference/api/#enable-local-inspection) and restrict access to trusted clients.
+Use a loopback address for local debugging:
 
-```toml
-[api]
-enabled = true
+```yaml
+api:
+  enabled: true
+  address: "127.0.0.1:8686"
 
-[sources.in]
-type = "demo_logs"
-format = "shuffle"
-lines = [
-  "test1",
-  "test2",
-]
+sources:
+  in:
+    type: "demo_logs"
+    format: "shuffle"
+    lines: ["test1", "test2"]
 
-[sinks.out]
-type = "blackhole"
-inputs = ["in*"]
+sinks:
+  out:
+    type: "blackhole"
+    inputs: ["in*"]
 ```
 
 Run Vector with this configuration and watch the configuration for changes.
 
 ```console
-vector --config path/to/config.toml -w
+vector --config path/to/config.yaml -w
 ```
 
 Now run `vector tap`! You should start seeing a stream of
@@ -58,8 +59,8 @@ notifications (sent to `stderr`) and events (sent to `stdout`) in your terminal.
 
 ```console
 [tap] Pattern "*" successfully matched.
-{"message":"test1","source_type":"demo_logs","timestamp":"2022-02-22T19:20:40.487671258Z"}
-{"message":"test2","source_type":"demo_logs","timestamp":"2022-02-22T19:20:41.486858019Z"}
+{"log":{"message":"test1","source_type":"demo_logs","timestamp":"2022-02-22T19:20:40.487671258Z"}}
+{"log":{"message":"test2","source_type":"demo_logs","timestamp":"2022-02-22T19:20:41.486858019Z"}}
 ...
 ```
 
@@ -124,23 +125,21 @@ accordingly by re-matching your provided patterns.
 With `vector tap` running, add the following `demo_logs` source to the base
 configuration.
 
-```toml
-[sources.in-2]
-type = "demo_logs"
-format = "shuffle"
-lines = [
-  "new test1",
-  "new test2",
-]
+```yaml
+sources:
+  in-2:
+    type: "demo_logs"
+    format: "shuffle"
+    lines: ["new test1", "new test2"]
 ```
 
 You'll now see events from component `in-2` appear in `tap` output.
 
 ```console
 ...
-{"message":"new test2","source_type":"demo_logs","timestamp":"2022-02-22T21:07:50.106793803Z"}
-{"message":"test1","source_type":"demo_logs","timestamp":"2022-02-22T21:07:50.490873070Z"}
-{"message":"new test1","source_type":"demo_logs","timestamp":"2022-02-22T21:07:51.106744949Z"}
+{"log":{"message":"new test2","source_type":"demo_logs","timestamp":"2022-02-22T21:07:50.106793803Z"}}
+{"log":{"message":"test1","source_type":"demo_logs","timestamp":"2022-02-22T21:07:50.490873070Z"}}
+{"log":{"message":"new test1","source_type":"demo_logs","timestamp":"2022-02-22T21:07:51.106744949Z"}}
 ...
 ```
 
@@ -154,43 +153,45 @@ troubleshoot a pipeline.
 
 We'll use the following Vector configuration.
 
-```toml
-[api]
-enabled = true
+```yaml
+api:
+  enabled: true
 
-[sources.in]
-type = "demo_logs"
-format = "shuffle"
-lines = [
-  '{ "type": "icecream", "flavor": "strawberry" }',
-  '{ "type": "icecream", "flavor": "chocolate" }',
-  '{ "type": "icecream", "flavor": "wasabi" }',
-]
+sources:
+  in:
+    type: "demo_logs"
+    format: "shuffle"
+    lines:
+      - '{ "type": "icecream", "flavor": "strawberry" }'
+      - '{ "type": "icecream", "flavor": "chocolate" }'
+      - '{ "type": "icecream", "flavor": "wasabi" }'
 
-[transforms.picky]
-type = "remap"
-inputs = ["in"]
-drop_on_abort = true
-reroute_dropped = true
-source = '''
-  if .flavor == "strawberry" {
-    .happiness = 10
-  } else if .flavor == "chocolate" {
-    .happiness = 5
-  } else {
-    abort
-  }
-'''
+transforms:
+  picky:
+    type: "remap"
+    inputs: ["in"]
+    drop_on_abort: true
+    reroute_dropped: true
+    source: |
+      if .flavor == "strawberry" {
+        .happiness = 10
+      } else if .flavor == "chocolate" {
+        .happiness = 5
+      } else {
+        abort
+      }
 
-[sinks.store]
-type = "console"
-inputs = ["picky"]
-target = "stdout"
-encoding.codec = "json"
+sinks:
+  store:
+    type: "console"
+    inputs: ["picky"]
+    target: "stdout"
+    encoding:
+      codec: "json"
 
-[sinks.trash]
-type = "blackhole"
-inputs = ["picky.dropped"]
+  trash:
+    type: "blackhole"
+    inputs: ["picky.dropped"]
 ```
 
 Running this configuration, we expect to see our favorite ice cream logs appear
@@ -208,8 +209,8 @@ Are all the events being dropped instead? A quick glance with `vector tap
 a stream of all our dropped logs. On closer examination, it's clear that our
 events don't have the shape we expected.
 
-```jsonc
-{"message":"{ \"type\": \"icecream\", \"flavor\": \"strawberry\" } }
+```json
+{"log":{"message":"{ \"type\": \"icecream\", \"flavor\": \"strawberry\" }"}}
 ```
 
 There's no `.flavor` field for our conditional to run on. Instead, the entire
@@ -239,8 +240,8 @@ itself.
 
 ## Under the hood
 
-Under the hood, `vector tap` is powered by the [Vector API], specifically by the
-`outputEventsByComponentIdPatterns` subscription. If you'd like a more direct
+Under the hood, `vector tap` is powered by the gRPC [Vector API], specifically by the
+`StreamOutputEvents` RPC of the `vector.observability.v1.ObservabilityService` service. If you'd like a more direct
 and programmatic way to examine events in your pipeline, consider interacting
 with the API directly.
 

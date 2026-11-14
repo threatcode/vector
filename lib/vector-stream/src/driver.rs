@@ -1,15 +1,16 @@
 use std::{collections::VecDeque, fmt, future::poll_fn, task::Poll};
 
-use futures::{poll, FutureExt, Stream, StreamExt, TryFutureExt};
+use futures::{FutureExt, Stream, StreamExt, TryFutureExt, poll};
 use tokio::{pin, select};
 use tower::Service;
 use tracing::Instrument;
-use vector_common::internal_event::emit;
-use vector_common::internal_event::{
-    register, ByteSize, BytesSent, CallError, InternalEventHandle as _, PollReadyError, Registered,
-    RegisteredEventCache, SharedString, TaggedEventsSent,
+use vector_common::{
+    internal_event::{
+        ByteSize, BytesSent, CallError, InternalEventHandle as _, PollReadyError, Registered,
+        RegisteredEventCache, SharedString, TaggedEventsSent, emit, register,
+    },
+    request_metadata::{GroupedCountByteSize, MetaDescriptive},
 };
-use vector_common::request_metadata::{GroupedCountByteSize, MetaDescriptive};
 use vector_core::event::{EventFinalizers, EventStatus, Finalizable};
 
 use super::FuturesUnorderedCount;
@@ -43,6 +44,7 @@ pub struct Driver<St, Svc> {
     input: St,
     service: Svc,
     protocol: Option<SharedString>,
+    request_error_status: EventStatus,
 }
 
 impl<St, Svc> Driver<St, Svc> {
@@ -51,6 +53,7 @@ impl<St, Svc> Driver<St, Svc> {
             input,
             service,
             protocol: None,
+            request_error_status: EventStatus::Rejected,
         }
     }
 
@@ -61,6 +64,17 @@ impl<St, Svc> Driver<St, Svc> {
     #[must_use]
     pub fn protocol(mut self, protocol: impl Into<SharedString>) -> Self {
         self.protocol = Some(protocol.into());
+        self
+    }
+
+    /// Sets the finalization status for requests that fail with a service error.
+    ///
+    /// The default is `Rejected`. Use `Errored` when the source must be able to retry failed
+    /// delivery. Only rejected failures emit dropped-event telemetry; other failures are logged.
+    /// This does not change how successful service calls interpret response status codes.
+    #[must_use]
+    pub const fn with_request_error_status(mut self, status: EventStatus) -> Self {
+        self.request_error_status = status;
         self
     }
 }
@@ -82,6 +96,10 @@ where
     ///
     /// The return type is mostly to simplify caller code.
     /// An error is currently only returned if a service returns an error from `poll_ready`
+    #[expect(
+        clippy::result_unit_err,
+        reason = "The driver only reports whether service readiness failed"
+    )]
     pub async fn run(self) -> Result<(), ()> {
         let mut in_flight = FuturesUnorderedCount::new();
         let mut next_batch: Option<VecDeque<St::Item>> = None;
@@ -91,6 +109,7 @@ where
             input,
             mut service,
             protocol,
+            request_error_status,
         } = self;
 
         let batched_input = input.ready_chunks(1024);
@@ -174,8 +193,9 @@ where
                                 request_id,
                                 finalizers,
                                 event_count,
-                                &bytes_sent,
+                                bytes_sent.as_ref(),
                                 &events_sent,
+                                request_error_status,
                             ))
                             .instrument(info_span!("request", request_id).or_current());
 
@@ -200,33 +220,38 @@ where
         request_id: usize,
         finalizers: EventFinalizers,
         event_count: usize,
-        bytes_sent: &Option<Registered<BytesSent>>,
+        bytes_sent: Option<&Registered<BytesSent>>,
         events_sent: &RegisteredEventCache<(), TaggedEventsSent>,
+        request_error_status: EventStatus,
     ) {
         match result {
             Err(error) => {
-                Self::emit_call_error(Some(error), request_id, event_count);
-                finalizers.update_status(EventStatus::Rejected);
+                if request_error_status == EventStatus::Rejected {
+                    Self::emit_call_error(Some(error), request_id, event_count);
+                } else {
+                    error!(message = "Request failed.", ?error, request_id);
+                }
+                finalizers.update_status(request_error_status);
             }
             Ok(response) => {
                 trace!(message = "Service call succeeded.", request_id);
                 finalizers.update_status(response.event_status());
                 if response.event_status() == EventStatus::Delivered {
-                    if let Some(bytes_sent) = bytes_sent {
-                        if let Some(byte_size) = response.bytes_sent() {
-                            bytes_sent.emit(ByteSize(byte_size));
-                        }
+                    if let Some(bytes_sent) = bytes_sent
+                        && let Some(byte_size) = response.bytes_sent()
+                    {
+                        bytes_sent.emit(ByteSize(byte_size));
                     }
 
                     response.events_sent().emit_event(events_sent);
 
-                // This condition occurs specifically when the `HttpBatchService::call()` is called *within* the `Service::call()`
+                // This condition occurs when the service's `call()` performs the request inline and reports a rejection through the response instead of an error
                 } else if response.event_status() == EventStatus::Rejected {
                     Self::emit_call_error(None, request_id, event_count);
                     finalizers.update_status(EventStatus::Rejected);
                 }
             }
-        };
+        }
         drop(finalizers); // suppress "argument not consumed" warning
     }
 
@@ -246,13 +271,16 @@ mod tests {
     use std::{
         future::Future,
         pin::Pin,
-        sync::{atomic::AtomicUsize, atomic::Ordering, Arc},
-        task::{ready, Context, Poll},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Poll, ready},
         time::Duration,
     };
 
     use futures_util::stream;
-    use rand::{prelude::StdRng, SeedableRng};
+    use rand::{SeedableRng, prelude::StdRng};
     use rand_distr::{Distribution, Pareto};
     use tokio::{
         sync::{OwnedSemaphorePermit, Semaphore},
@@ -261,11 +289,13 @@ mod tests {
     use tokio_util::sync::PollSemaphore;
     use tower::Service;
     use vector_common::{
-        finalization::{BatchNotifier, EventFinalizer, EventFinalizers, EventStatus, Finalizable},
+        finalization::{
+            BatchNotifier, BatchStatus, EventFinalizer, EventFinalizers, EventStatus, Finalizable,
+        },
+        internal_event::CountByteSize,
         json_size::JsonSize,
-        request_metadata::{GroupedCountByteSize, RequestMetadata},
+        request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata},
     };
-    use vector_common::{internal_event::CountByteSize, request_metadata::MetaDescriptive};
 
     use super::{Driver, DriverResponse};
 
@@ -360,9 +390,8 @@ mod tests {
         pub(crate) fn get_sleep_dur(&mut self) -> Duration {
             let lower = self.lower_bound_us;
             let upper = self.upper_bound_us;
-
-            // Generate a value between 10ms and 500ms, with a long tail shape to the distribution.
-            #[allow(clippy::cast_sign_loss)] // Value will be positive anyways
+            // Generate a value between `lower` and `upper`, with a long tail shape to the distribution.
+            #[allow(clippy::cast_sign_loss)] // Value will be positive anyway
             self.jitter
                 .sample_iter(&mut self.jitter_gen)
                 .map(|n| n * lower as f64)
@@ -411,6 +440,30 @@ mod tests {
 
                 Ok(DelayResponse::new())
             })
+        }
+    }
+
+    #[tokio::test]
+    async fn request_errors_use_configured_finalization() {
+        for (status, expected) in [
+            (None, BatchStatus::Rejected),
+            (Some(EventStatus::Errored), BatchStatus::Errored),
+        ] {
+            let (notifier, receiver) = BatchNotifier::new_with_receiver();
+            let request = DelayRequest(
+                EventFinalizers::new(EventFinalizer::new(notifier)),
+                RequestMetadata::default(),
+            );
+            let service = tower::service_fn(|_: DelayRequest| {
+                futures::future::ready(Err::<DelayResponse, _>("connection failed"))
+            });
+            let mut driver = Driver::new(stream::iter([request]), service);
+            if let Some(status) = status {
+                driver = driver.with_request_error_status(status);
+            }
+
+            driver.run().await.unwrap();
+            assert_eq!(receiver.await, expected);
         }
     }
 

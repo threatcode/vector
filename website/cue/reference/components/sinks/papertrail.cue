@@ -4,7 +4,6 @@ components: sinks: papertrail: {
 	title: "Papertrail"
 
 	classes: {
-		commonly_used: false
 		delivery:      "at_least_once"
 		development:   "stable"
 		egress_method: "stream"
@@ -56,10 +55,9 @@ components: sinks: papertrail: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.sinks.papertrail.configuration
+	configuration: generated.components.sinks.papertrail.configuration
 
 	input: {
 		logs:    true

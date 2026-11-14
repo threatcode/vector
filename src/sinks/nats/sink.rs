@@ -1,15 +1,15 @@
 use std::sync::Arc;
+use vector_lib::internal_event::emit;
 
 use snafu::ResultExt;
 
-use crate::sinks::prelude::*;
-
 use super::{
-    config::{NatsSinkConfig, NatsTowerRequestConfigDefaults},
-    request_builder::{NatsEncoder, NatsRequestBuilder},
-    service::{NatsResponse, NatsService},
     EncodingSnafu, NatsError,
+    config::{NatsHeaderConfig, NatsPublisher, NatsSinkConfig, NatsTowerRequestConfigDefaults},
+    request_builder::{NatsEncoder, NatsRequest, NatsRequestBuilder},
+    service::{NatsResponse, NatsService},
 };
+use crate::sinks::prelude::*;
 
 pub(super) struct NatsEvent {
     pub(super) event: Event,
@@ -20,8 +20,9 @@ pub(super) struct NatsSink {
     request: TowerRequestConfig<NatsTowerRequestConfigDefaults>,
     transformer: Transformer,
     encoder: Encoder<()>,
-    connection: Arc<async_nats::Client>,
-    subject: Template,
+    publisher: Arc<NatsPublisher>,
+    subject: ConfinedTemplate,
+    headers: Option<NatsHeaderConfig>,
 }
 
 impl NatsSink {
@@ -30,7 +31,7 @@ impl NatsSink {
             .subject
             .render_string(&event)
             .map_err(|missing_keys| {
-                emit!(TemplateRenderingError {
+                emit(TemplateRenderingError {
                     error: missing_keys,
                     field: Some("subject"),
                     drop_event: true,
@@ -41,20 +42,25 @@ impl NatsSink {
         Some(NatsEvent { event, subject })
     }
 
-    pub(super) async fn new(config: NatsSinkConfig) -> Result<Self, NatsError> {
-        let connection = Arc::new(config.connect().await?);
+    pub(super) async fn new(
+        config: NatsSinkConfig,
+        subject: ConfinedTemplate,
+        server_addresses: Vec<async_nats::ServerAddr>,
+    ) -> Result<Self, NatsError> {
+        let publisher = Arc::new(config.publisher(server_addresses).await?);
         let transformer = config.encoding.transformer();
         let serializer = config.encoding.build().context(EncodingSnafu)?;
         let encoder = Encoder::<()>::new(serializer);
         let request = config.request;
-        let subject = config.subject;
+        let headers = config.jetstream.headers;
 
         Ok(NatsSink {
             request,
-            connection,
             transformer,
             encoder,
+            publisher,
             subject,
+            headers,
         })
     }
 
@@ -66,12 +72,13 @@ impl NatsSink {
                 encoder: self.encoder.clone(),
                 transformer: self.transformer.clone(),
             },
+            headers: self.headers.clone(),
         };
 
         let service = ServiceBuilder::new()
             .settings(request, NatsRetryLogic)
             .service(NatsService {
-                connection: Arc::clone(&self.connection),
+                publisher: Arc::clone(&self.publisher),
             });
 
         input
@@ -80,7 +87,7 @@ impl NatsSink {
             .filter_map(|request| async move {
                 match request {
                     Err(e) => {
-                        error!("Failed to build NATS request: {:?}.", e);
+                        error!("Failed to build NATS request: {e:?}.");
                         None
                     }
                     Ok(req) => Some(req),
@@ -105,6 +112,7 @@ pub(super) struct NatsRetryLogic;
 
 impl RetryLogic for NatsRetryLogic {
     type Error = NatsError;
+    type Request = NatsRequest;
     type Response = NatsResponse;
 
     fn is_retriable_error(&self, _error: &Self::Error) -> bool {

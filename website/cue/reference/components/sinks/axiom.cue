@@ -4,9 +4,8 @@ components: sinks: axiom: {
 	title: "Axiom"
 
 	classes: {
-		commonly_used: false
 		delivery:      "at_least_once"
-		development:   "beta"
+		development:   "stable"
 		egress_method: "batch"
 		service_providers: ["Axiom"]
 		stateful: false
@@ -19,12 +18,16 @@ components: sinks: axiom: {
 		send: {
 			batch: {
 				enabled:      true
-				common:       false
 				max_events:   1000
 				max_bytes:    1_048_576
 				timeout_secs: 1.0
 			}
-			compression: enabled: false
+			compression: {
+				enabled: true
+				default: "zstd"
+				algorithms: ["zstd"]
+				levels: ["none", "fast", "default", "best", 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+			}
 			encoding: {
 				enabled: true
 				codec: enabled: false
@@ -62,10 +65,9 @@ components: sinks: axiom: {
 	support: {
 		requirements: []
 		warnings: []
-		notices: []
 	}
 
-	configuration: base.components.sinks.axiom.configuration
+	configuration: generated.components.sinks.axiom.configuration
 
 	input: {
 		logs: true
@@ -77,7 +79,7 @@ components: sinks: axiom: {
 			set:          true
 			summary:      true
 		}
-		traces: false
+		traces: true
 	}
 
 	how_it_works: {

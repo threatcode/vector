@@ -7,8 +7,7 @@ components: sources: opentelemetry: {
 	title: "OpenTelemetry"
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["daemon", "aggregator"]
 		development:   "beta"
 		egress_method: "stream"
@@ -39,19 +38,14 @@ components: sources: opentelemetry: {
 
 	support: {
 		requirements: []
-		warnings: [
-			"""
-				The `opentelemetry` source only supports log events at this time.
-				""",
-		]
-		notices: []
+		warnings: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.opentelemetry.configuration
+	configuration: generated.components.sources.opentelemetry.configuration
 
 	outputs: [
 		{
@@ -60,16 +54,27 @@ components: sources: opentelemetry: {
 				Received log events will go to this output stream. Use `<component_id>.logs` as an input to downstream transforms and sinks.
 				"""
 		},
+		{
+			name: "traces"
+			description: """
+				Received trace events will go to this output stream. Use `<component_id>.traces` as an input to downstream transforms and sinks.
+				"""
+		},
+		{
+			name: "metrics"
+			description: """
+				Received metric events will go to this output stream. Use `<component_id>.metrics` as an input to downstream transforms and sinks.
+				"""
+		},
 	]
 
 	output: {
 		logs: event: {
-			description: "An individual log event from a batch of events received through an OTLP request"
+			description: "An individual log event from a batch of events received through an OTLP request. The following schema applies when logs use native conversion, which is the default. When `decoding.codec` is `otlp`, this schema applies only if `decoding.signal_types` excludes `logs`."
 			fields: {
 				attributes: {
 					description: "Attributes that describe the specific event occurrence."
 					required:    false
-					common:      true
 					type: object: {
 						examples: [
 							{
@@ -92,7 +97,6 @@ components: sources: opentelemetry: {
 				resources: {
 					description: "Set of attributes that describe the resource."
 					required:    false
-					common:      true
 					type: object: {
 						examples: [
 							{
@@ -106,10 +110,45 @@ components: sources: opentelemetry: {
 						]
 					}
 				}
+				"scope.name": {
+					description: "Instrumentation scope name (often logger name)."
+					required:    false
+					type: string: {
+						default: null
+						examples: ["some.module.name"]
+					}
+				}
+				"scope.version": {
+					description: "Instrumentation scope version."
+					required:    false
+					type: string: {
+						default: null
+						examples: ["1.2.3"]
+					}
+				}
+				"scope.attributes": {
+					description: "Set of attributes that belong to the instrumentation scope."
+					required:    false
+					type: object: {
+						examples: [
+							{
+								"attr1": "value1"
+								"attr2": "value2"
+								"attr3": "value3"
+							},
+						]
+					}
+				}
+				"scope.dropped_attributes_count": {
+					description: "Number of attributes dropped from the instrumentation scope (if not zero)."
+					required:    false
+					type: uint: {
+						unit: null
+					}
+				}
 				message: {
 					description: "Contains the body of the log record."
 					required:    false
-					common:      true
 					type: string: {
 						default: null
 						examples: ["20200415T072306-0700 INFO I like donuts"]
@@ -118,7 +157,6 @@ components: sources: opentelemetry: {
 				trace_id: {
 					description: "Request trace id as defined in W3C Trace Context. Can be set for logs that are part of request processing and have an assigned trace id."
 					required:    false
-					common:      true
 					type: string: {
 						default: null
 						examples: ["66346462623365646437363566363230"]
@@ -127,7 +165,6 @@ components: sources: opentelemetry: {
 				span_id: {
 					description: "Can be set for logs that are part of a particular processing span."
 					required:    false
-					common:      true
 					type: string: {
 						default: null
 						examples: ["43222c2d51a7abe3"]
@@ -140,7 +177,6 @@ components: sources: opentelemetry: {
 						Smaller numerical values correspond to less severe events (such as debug events), larger numerical values correspond to more severe events (such as errors and critical events).
 						"""
 					required: false
-					common:   true
 					type: uint: {
 						default: null
 						unit:    null
@@ -150,7 +186,6 @@ components: sources: opentelemetry: {
 				severity_text: {
 					description: "Severity text (also known as log level)."
 					required:    false
-					common:      true
 					type: string: {
 						default: null
 						examples: ["TRACE3", "INFO", "ERROR", "FATAL4"]
@@ -159,7 +194,6 @@ components: sources: opentelemetry: {
 				flags: {
 					description: "Trace flag as defined in W3C Trace Context specification."
 					required:    false
-					common:      true
 					type: uint: {
 						default: null
 						unit:    null
@@ -192,9 +226,59 @@ components: sources: opentelemetry: {
 				}
 			}
 		}
+		metrics: "": {
+			description: "Metric events that may be emitted by this source."
+		}
+		traces: "": {
+			description: "Trace events that may be emitted by this source."
+		}
 	}
 
 	how_it_works: {
+		otlp_decoding: {
+			title: "OTLP Decoding Usage"
+			body: """
+				Set `decoding.codec` to `otlp` to preserve the OTLP representation of incoming events.
+				Use `decoding.signal_types` to select which signals retain that representation; unlisted signals
+				are still accepted and converted to Vector's native format. Omitting `signal_types` preserves
+				OTLP for all signals, while an empty list uses native conversion for all signals. Omitting
+				`decoding` also uses native conversion for all signals.
+
+				The following example preserves OTLP logs and forwards them to an OpenTelemetry collector
+				without a `remap` transform. Metrics and traces continue to use native conversion.
+
+				```yaml
+				sources:
+				  otel:
+				    type: opentelemetry
+				    grpc:
+				      address: 0.0.0.0:4317
+				    http:
+				      address: 0.0.0.0:4318
+				    decoding:
+				      codec: otlp
+				      signal_types: ["logs"]
+				sinks:
+				  otel_sink:
+				    inputs:
+				      - otel.logs
+				    type: opentelemetry
+				    protocol:
+				      type: http
+				      uri: http://localhost:5318/v1/logs
+				      encoding:
+				        codec: otlp
+				```
+
+				To preserve OTLP metrics or traces, include `metrics` or `traces` in `signal_types` and route
+				the corresponding source output to an OTLP sink. Metrics preserved as OTLP are emitted as
+				Vector log events, so native metric transforms such as `aggregate` cannot process them.
+				To use native metric transforms, exclude `metrics` from `signal_types`.
+
+				The legacy `use_otlp_decoding` option is deprecated. See the
+				[migration guide](/deprecations/#opentelemetry-use_otlp_decoding) for existing configurations.
+				"""
+		}
 		tls: {
 			title: "Transport Layer Security (TLS)"
 			body:  """
@@ -204,9 +288,32 @@ components: sources: opentelemetry: {
 				`/usr/local/ssl/openssl.cnf` or can be specified with the `OPENSSL_CONF` environment variable.
 				"""
 		}
+		traces: {
+			title: "Ingest OTLP traces"
+			body: """
+				Trace support is experimental and subject to change as Vector has no strongly-typed structure for traces internally. Instead traces are stored as a key/value map similar to logs. This may change in the future to be a structured format.
+				"""
+		}
+		metrics: {
+			title: "Ingest metrics"
+			body: """
+				Metrics support is experimental and subject to change due to structural differences between the internal Vector metric data model and OpenTelemetry.
+				If aggregation temporality is supported for an OpenTelemetry metric type, it influences the corresponding Vector metric kind as follows: If temporality is set to Delta, the metric kind is Incremental; otherwise, it is Absolute.
+				Metric type mappings:
+				Gauge is mapped to a Vector Gauge;
+				Sum is mapped to a Vector Counter if `is_monotonic` is true, to Vector Gauge if `is_monotonic` is false;
+				Histogram is mapped to a Vector AggregatedHistogram;
+				Exponential Histogram is also mapped to a Vector AggregatedHistogram, bucket boundaries are reconstructed from the exponential scale;
+				Summary is mapped to a Vector Aggregated Summary.
+				"""
+		}
 	}
 
 	telemetry: metrics: {
+		component_request_active:             components.sources.internal_metrics.output.metrics.component_request_active
+		component_request_concurrency_limit:  components.sources.internal_metrics.output.metrics.component_request_concurrency_limit
+		component_timed_out_requests_total:   components.sources.internal_metrics.output.metrics.component_timed_out_requests_total
+		component_load_shed_requests_total:   components.sources.internal_metrics.output.metrics.component_load_shed_requests_total
 		grpc_server_handler_duration_seconds: components.sources.internal_metrics.output.metrics.grpc_server_handler_duration_seconds
 		grpc_server_messages_received_total:  components.sources.internal_metrics.output.metrics.grpc_server_messages_received_total
 		grpc_server_messages_sent_total:      components.sources.internal_metrics.output.metrics.grpc_server_messages_sent_total

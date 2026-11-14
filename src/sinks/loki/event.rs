@@ -1,20 +1,22 @@
 use std::{collections::HashMap, io};
 
-use crate::sinks::{prelude::*, util::encoding::Encoder};
 use bytes::Bytes;
-use serde::{ser::SerializeSeq, Serialize};
+use serde::{Serialize, ser::SerializeSeq};
 use vector_lib::config::telemetry;
 
-pub type Labels = Vec<(String, String)>;
+use crate::sinks::{prelude::*, util::encoding::Encoder};
+
+pub(super) type Labels = Vec<(String, String)>;
+pub(super) type StructuredMetadata = Vec<(String, String)>;
 
 #[derive(Clone)]
-pub enum LokiBatchEncoding {
+pub(super) enum LokiBatchEncoding {
     Json,
     Protobuf,
 }
 
 #[derive(Clone)]
-pub struct LokiBatchEncoder(pub LokiBatchEncoding);
+pub(super) struct LokiBatchEncoder(pub LokiBatchEncoding);
 
 impl Encoder<Vec<LokiRecord>> for LokiBatchEncoder {
     fn encode_input(
@@ -48,6 +50,7 @@ impl Encoder<Vec<LokiRecord>> for LokiBatchEncoder {
                                     loki_logproto::util::Entry(
                                         event.timestamp,
                                         String::from_utf8_lossy(&event.event).into_owned(),
+                                        event.structured_metadata.clone(),
                                     )
                                 })
                                 .collect();
@@ -63,14 +66,14 @@ impl Encoder<Vec<LokiRecord>> for LokiBatchEncoder {
 }
 
 #[derive(Debug, Default, Serialize)]
-pub struct LokiBatch {
+pub(super) struct LokiBatch {
     stream_by_labels: HashMap<String, LokiStream>,
     #[serde(skip)]
     finalizers: EventFinalizers,
 }
 
 #[derive(Debug, Default, Serialize)]
-pub struct LokiStream {
+pub(super) struct LokiStream {
     stream: HashMap<String, String>,
     values: Vec<LokiEvent>,
 }
@@ -119,7 +122,7 @@ impl From<Vec<LokiRecord>> for LokiBatch {
                 stream.values.push(item.event);
                 res
             });
-        for (_k, stream) in result.stream_by_labels.iter_mut() {
+        for stream in result.stream_by_labels.values_mut() {
             stream.values.sort_by_key(|e| e.timestamp);
         }
         result
@@ -127,14 +130,19 @@ impl From<Vec<LokiRecord>> for LokiBatch {
 }
 
 #[derive(Clone, Debug)]
-pub struct LokiEvent {
+pub(super) struct LokiEvent {
     pub timestamp: i64,
     pub event: Bytes,
+    pub structured_metadata: StructuredMetadata,
 }
 
 impl ByteSizeOf for LokiEvent {
     fn allocated_bytes(&self) -> usize {
-        self.timestamp.allocated_bytes() + self.event.allocated_bytes()
+        self.timestamp.allocated_bytes()
+            + self.event.allocated_bytes()
+            + self.structured_metadata.iter().fold(0, |res, item| {
+                res + item.0.allocated_bytes() + item.1.allocated_bytes()
+            })
     }
 }
 
@@ -143,16 +151,24 @@ impl Serialize for LokiEvent {
     where
         S: serde::Serializer,
     {
-        let mut seq = serializer.serialize_seq(Some(2))?;
+        let mut seq = serializer.serialize_seq(Some(3))?;
         seq.serialize_element(&self.timestamp.to_string())?;
         let event = String::from_utf8_lossy(&self.event);
         seq.serialize_element(&event)?;
+        // Convert structured_metadata into a map structure
+        seq.serialize_element(
+            &self
+                .structured_metadata
+                .iter()
+                .cloned()
+                .collect::<HashMap<String, String>>(),
+        )?;
         seq.end()
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct LokiRecord {
+pub(super) struct LokiRecord {
     pub partition: PartitionKey,
     pub labels: Labels,
     pub event: LokiEvent,
@@ -197,7 +213,7 @@ impl GetEventCountTags for LokiRecord {
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
-pub struct PartitionKey {
+pub(super) struct PartitionKey {
     pub tenant_id: Option<String>,
 }
 
@@ -205,7 +221,6 @@ impl ByteSizeOf for PartitionKey {
     fn allocated_bytes(&self) -> usize {
         self.tenant_id
             .as_ref()
-            .map(|value| value.allocated_bytes())
-            .unwrap_or(0)
+            .map_or(0, ByteSizeOf::allocated_bytes)
     }
 }

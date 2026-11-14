@@ -1,29 +1,33 @@
 use std::io;
 
 use bytes::Bytes;
-use vector_lib::codecs::encoding::Framer;
-use vector_lib::event::Event;
-use vector_lib::finalization::{EventFinalizers, Finalizable};
-use vector_lib::request_metadata::RequestMetadata;
-
-use crate::sinks::util::Compression;
-use crate::{
-    codecs::{Encoder, Transformer},
-    sinks::util::{
-        metadata::RequestMetadataBuilder, request_builder::EncodeResult, RequestBuilder,
-    },
+use vector_lib::{
+    codecs::encoding::Framer,
+    event::Event,
+    finalization::{EventFinalizers, Finalizable},
+    request_metadata::RequestMetadata,
 };
 
 use super::service::DatabendRequest;
+use crate::{
+    codecs::{Encoder, Transformer},
+    sinks::util::{
+        Compression, RequestBuilder, metadata::RequestMetadataBuilder,
+        request_builder::EncodeResult,
+    },
+};
 
 #[derive(Clone)]
-pub struct DatabendRequestBuilder {
+pub(super) struct DatabendRequestBuilder {
     compression: Compression,
     encoder: (Transformer, Encoder<Framer>),
 }
 
 impl DatabendRequestBuilder {
-    pub const fn new(compression: Compression, encoder: (Transformer, Encoder<Framer>)) -> Self {
+    pub(super) const fn new(
+        compression: Compression,
+        encoder: (Transformer, Encoder<Framer>),
+    ) -> Self {
         Self {
             compression,
             encoder,

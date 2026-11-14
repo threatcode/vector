@@ -3,29 +3,37 @@ use std::task::Poll;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{
+    Request,
     header::{HeaderName, HeaderValue},
-    Request, Uri,
 };
-use hyper::Body;
+use hyper::body::Incoming;
 use tower::Service;
-use vector_lib::request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata};
-use vector_lib::stream::DriverResponse;
+use vector_http::{HttpError, full_body};
+use vector_lib::{
+    request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata},
+    stream::DriverResponse,
+};
 
 use crate::{
     event::{EventFinalizers, EventStatus, Finalizable},
     gcp::GcpAuthenticator,
-    http::{HttpClient, HttpError},
+    http::HttpClient,
+    sinks::util::HttpEndpoint,
 };
 
 #[derive(Debug, Clone)]
 pub struct GcsService {
     client: HttpClient,
-    base_url: String,
+    base_url: HttpEndpoint,
     auth: GcpAuthenticator,
 }
 
 impl GcsService {
-    pub const fn new(client: HttpClient, base_url: String, auth: GcpAuthenticator) -> GcsService {
+    pub const fn new(
+        client: HttpClient,
+        base_url: HttpEndpoint,
+        auth: GcpAuthenticator,
+    ) -> GcsService {
         GcsService {
             client,
             base_url,
@@ -68,12 +76,17 @@ pub struct GcsRequestSettings {
     pub content_type: HeaderValue,
     pub content_encoding: Option<HeaderValue>,
     pub storage_class: HeaderValue,
+    pub cache_control: Option<HeaderValue>,
     pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 
+/// Response of a GCS-family request, shared by the `gcp_cloud_storage` and `gcp_chronicle`
+/// services so both use [`GcsRetryLogic`](super::config::GcsRetryLogic).
 #[derive(Debug)]
 pub struct GcsResponse {
-    pub inner: http::Response<Body>,
+    /// The native client's response; delivery and retries use only its status, so the body
+    /// stays unread.
+    pub inner: http::Response<Incoming>,
     pub metadata: RequestMetadata,
 }
 
@@ -112,9 +125,11 @@ impl Service<GcsRequest> for GcsService {
         let settings = request.settings;
         let metadata = request.metadata;
 
-        let uri = format!("{}{}", self.base_url, request.key)
-            .parse::<Uri>()
-            .unwrap();
+        let uri = self
+            .base_url
+            .append_path(&request.key)
+            .expect("partition key must be a valid URI path segment")
+            .into_uri();
 
         let mut builder = Request::put(uri);
         let headers = builder.headers_mut().unwrap();
@@ -127,17 +142,20 @@ impl Service<GcsRequest> for GcsService {
             .content_encoding
             .map(|ce| headers.insert("content-encoding", ce));
         settings.acl.map(|acl| headers.insert("x-goog-acl", acl));
+        settings
+            .cache_control
+            .map(|cc| headers.insert("cache-control", cc));
         headers.insert("x-goog-storage-class", settings.storage_class);
         for (p, v) in settings.headers {
             headers.insert(p, v);
         }
 
-        let mut http_request = builder.body(Body::from(request.body)).unwrap();
+        let mut http_request = builder.body(request.body).unwrap();
         self.auth.apply(&mut http_request);
 
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         Box::pin(async move {
-            let result = client.call(http_request).await;
+            let result = client.send(http_request.map(full_body)).await;
             result.map(|inner| GcsResponse { inner, metadata })
         })
     }

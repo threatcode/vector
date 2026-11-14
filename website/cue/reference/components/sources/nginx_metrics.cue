@@ -4,8 +4,7 @@ components: sources: nginx_metrics: {
 	title: "Nginx Metrics"
 
 	classes: {
-		commonly_used: false
-		delivery:      "at_least_once"
+		delivery: "at_least_once"
 		deployment_roles: ["daemon", "sidecar"]
 		development:   "stable"
 		egress_method: "batch"
@@ -42,14 +41,13 @@ components: sources: nginx_metrics: {
 		]
 
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.nginx_metrics.configuration
+	configuration: generated.components.sources.nginx_metrics.configuration
 
 	how_it_works: {
 		mod_status: {

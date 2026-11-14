@@ -3,33 +3,40 @@ use std::{
     task::{Context, Poll},
 };
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{Request, StatusCode, Uri};
-use hyper::Body;
+use http_body_util::BodyExt;
 use snafu::ResultExt;
 use tower::Service;
-use vector_lib::event::{EventFinalizers, EventStatus, Finalizable};
-use vector_lib::request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata};
-use vector_lib::stream::DriverResponse;
+use vector_http::{HttpError, full_body};
+use vector_lib::{
+    event::{EventFinalizers, EventStatus, Finalizable},
+    request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata},
+    stream::DriverResponse,
+};
 
 use crate::{
-    http::{BuildRequestSnafu, CallRequestSnafu, HttpClient, HttpError},
-    sinks::util::retries::{RetryAction, RetryLogic},
+    http::HttpClient,
+    sinks::{
+        HTTPRequestBuilderSnafu,
+        util::retries::{RetryAction, RetryLogic},
+    },
 };
 
 #[derive(Debug, Default, Clone)]
-pub struct TraceApiRetry;
+pub(super) struct TraceApiRetry;
 
 impl RetryLogic for TraceApiRetry {
     type Error = HttpError;
+    type Request = TraceApiRequest;
     type Response = TraceApiResponse;
 
     fn is_retriable_error(&self, _error: &Self::Error) -> bool {
         true
     }
 
-    fn should_retry_response(&self, response: &Self::Response) -> RetryAction {
+    fn should_retry_response(&self, response: &Self::Response) -> RetryAction<Self::Request> {
         let status = response.status_code;
         match status {
             // Use the same status code/retry policy as the Trace agent, additionally retrying
@@ -43,16 +50,16 @@ impl RetryLogic for TraceApiRetry {
             StatusCode::FORBIDDEN => RetryAction::Retry("forbidden".into()),
             StatusCode::REQUEST_TIMEOUT => RetryAction::Retry("request timeout".into()),
             _ if status.is_server_error() => RetryAction::Retry(
-                format!("{}: {}", status, String::from_utf8_lossy(&response.body)).into(),
+                format!("{status}: {}", String::from_utf8_lossy(&response.body)).into(),
             ),
             _ if status.is_success() => RetryAction::Successful,
-            _ => RetryAction::DontRetry(format!("response status: {}", status).into()),
+            _ => RetryAction::DontRetry(format!("response status: {status}").into()),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct TraceApiRequest {
+pub(crate) struct TraceApiRequest {
     pub body: Bytes,
     pub headers: BTreeMap<String, String>,
     pub finalizers: EventFinalizers,
@@ -62,12 +69,17 @@ pub struct TraceApiRequest {
 }
 
 impl TraceApiRequest {
-    pub fn into_http_request(self) -> http::Result<Request<Body>> {
+    /// Builds a native HTTP request from the encoded trace payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a header name or value is invalid.
+    pub(crate) fn into_http_request(self) -> http::Result<Request<Bytes>> {
         let mut request = Request::post(self.uri);
-        for (k, v) in self.headers.iter() {
+        for (k, v) in &self.headers {
             request = request.header(k, v);
         }
-        request.body(Body::from(self.body))
+        request.body(self.body)
     }
 }
 
@@ -88,7 +100,7 @@ impl MetaDescriptive for TraceApiRequest {
 }
 
 #[derive(Debug)]
-pub struct TraceApiResponse {
+pub(super) struct TraceApiResponse {
     status_code: StatusCode,
     body: Bytes,
     byte_size: GroupedCountByteSize,
@@ -121,12 +133,12 @@ impl DriverResponse for TraceApiResponse {
 /// composed within a Tower "stack", such that we can easily and transparently
 /// provide retries, concurrency limits, rate limits, and more.
 #[derive(Debug, Clone)]
-pub struct TraceApiService {
+pub(super) struct TraceApiService {
     client: HttpClient,
 }
 
 impl TraceApiService {
-    pub const fn new(client: HttpClient) -> Self {
+    pub(super) const fn new(client: HttpClient) -> Self {
         Self { client }
     }
 }
@@ -137,8 +149,8 @@ impl Service<TraceApiRequest> for TraceApiService {
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     // Emission of Error internal event is handled upstream by the caller
-    fn poll_ready(&mut self, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        self.client.poll_ready(cx)
+    fn poll_ready(&mut self, _cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 
     // Emission of Error internal event is handled upstream by the caller
@@ -149,14 +161,14 @@ impl Service<TraceApiRequest> for TraceApiService {
             let metadata = std::mem::take(request.metadata_mut());
             let byte_size = metadata.into_events_estimated_json_encoded_byte_size();
             let uncompressed_size = request.uncompressed_size;
-            let http_request = request.into_http_request().context(BuildRequestSnafu)?;
+            let http_request = request
+                .into_http_request()
+                .context(HTTPRequestBuilderSnafu)
+                .map_err(crate::Error::from)?;
 
-            let response = client.send(http_request).await?;
+            let response = client.send(http_request.map(full_body)).await?;
             let (parts, body) = response.into_parts();
-            let mut body = hyper::body::aggregate(body)
-                .await
-                .context(CallRequestSnafu)?;
-            let body = body.copy_to_bytes(body.remaining());
+            let body = body.collect().await.map_err(HttpError::new)?.to_bytes();
 
             Ok(TraceApiResponse {
                 status_code: parts.status,

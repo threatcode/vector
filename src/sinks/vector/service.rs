@@ -1,33 +1,34 @@
 use std::task::{Context, Poll};
 
-use futures::{future::BoxFuture, TryFutureExt};
+use futures::{TryFutureExt, future::BoxFuture};
 use http::Uri;
-use hyper::client::HttpConnector;
-use hyper_openssl::HttpsConnector;
-use hyper_proxy::ProxyConnector;
 use prost::Message;
-use tonic::{body::BoxBody, IntoRequest};
+use tonic::{IntoRequest, body::Body as TonicBody};
 use tower::Service;
-use vector_lib::request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata};
-use vector_lib::stream::DriverResponse;
+use vector_http::{GrpcTransport, Http2Client};
+use vector_lib::{
+    internal_event::emit,
+    request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata},
+    stream::DriverResponse,
+};
 
-use super::VectorSinkError;
+use super::{VectorSinkError, compression::VectorCompression};
 use crate::{
+    Error,
     event::{EventFinalizers, EventStatus, Finalizable},
     internal_events::EndpointBytesSent,
     proto::vector as proto_vector,
     sinks::util::uri,
-    Error,
 };
 
 #[derive(Clone, Debug)]
-pub struct VectorService {
-    pub client: proto_vector::Client<HyperSvc>,
+pub(super) struct VectorService {
+    pub client: proto_vector::Client<GrpcTransport<TonicBody>>,
     pub protocol: String,
     pub endpoint: String,
 }
 
-pub struct VectorResponse {
+pub(super) struct VectorResponse {
     events_byte_size: GroupedCountByteSize,
 }
 
@@ -42,7 +43,7 @@ impl DriverResponse for VectorResponse {
 }
 
 #[derive(Clone, Default)]
-pub struct VectorRequest {
+pub(super) struct VectorRequest {
     pub finalizers: EventFinalizers,
     pub metadata: RequestMetadata,
     pub request: proto_vector::PushEventsRequest,
@@ -65,26 +66,44 @@ impl MetaDescriptive for VectorRequest {
 }
 
 impl VectorService {
-    pub fn new(
-        hyper_client: hyper::Client<ProxyConnector<HttpsConnector<HttpConnector>>, BoxBody>,
+    /// Sends every request to the scheme and authority of `uri`; its path is ignored.
+    ///
+    /// Fails if `uri` has no scheme or authority.
+    pub(super) fn new(
+        client: Http2Client<TonicBody>,
         uri: Uri,
-        compression: bool,
-    ) -> Self {
-        let (protocol, endpoint) = uri::protocol_endpoint(uri.clone());
-        let mut proto_client = proto_vector::Client::new(HyperSvc {
-            uri,
-            client: hyper_client,
-        });
+        compression: VectorCompression,
+    ) -> crate::Result<Self> {
+        let origin = grpc_origin(&uri)?;
+        let (protocol, endpoint) = uri::protocol_endpoint(uri);
+        let mut proto_client = proto_vector::Client::with_origin(GrpcTransport(client), origin);
 
-        if compression {
-            proto_client = proto_client.send_compressed(tonic::codec::CompressionEncoding::Gzip);
+        if let Some(encoding) = compression.as_tonic_encoding() {
+            proto_client = proto_client.send_compressed(encoding);
         }
-        Self {
+
+        Ok(Self {
             client: proto_client,
             protocol,
             endpoint,
-        }
+        })
     }
+}
+
+/// Returns the `scheme://authority/` origin that tonic prefixes to each gRPC method path.
+fn grpc_origin(uri: &Uri) -> crate::Result<Uri> {
+    let (Some(scheme), Some(authority)) = (uri.scheme(), uri.authority()) else {
+        return Err(VectorSinkError::NotAbsoluteUri {
+            uri: uri.to_string(),
+        }
+        .into());
+    };
+
+    Ok(Uri::builder()
+        .scheme(scheme.clone())
+        .authority(authority.clone())
+        .path_and_query("/")
+        .build()?)
 }
 
 impl Service<VectorRequest> for VectorService {
@@ -114,7 +133,7 @@ impl Service<VectorRequest> for VectorService {
                 .client
                 .push_events(list.request.into_request())
                 .map_ok(|_response| {
-                    emit!(EndpointBytesSent {
+                    emit(EndpointBytesSent {
                         byte_size,
                         protocol: &service.protocol,
                         endpoint: &service.endpoint,
@@ -127,36 +146,5 @@ impl Service<VectorRequest> for VectorService {
         };
 
         Box::pin(future)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct HyperSvc {
-    uri: Uri,
-    client: hyper::Client<ProxyConnector<HttpsConnector<HttpConnector>>, BoxBody>,
-}
-
-impl Service<hyper::Request<BoxBody>> for HyperSvc {
-    type Response = hyper::Response<hyper::Body>;
-    type Error = hyper::Error;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    // Emission of an internal event in case of errors is handled upstream by the caller.
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    // Emission of internal events for errors and dropped events is handled upstream by the caller.
-    fn call(&mut self, mut req: hyper::Request<BoxBody>) -> Self::Future {
-        let uri = Uri::builder()
-            .scheme(self.uri.scheme().unwrap().clone())
-            .authority(self.uri.authority().unwrap().clone())
-            .path_and_query(req.uri().path_and_query().unwrap().clone())
-            .build()
-            .unwrap();
-
-        *req.uri_mut() = uri;
-
-        Box::pin(self.client.request(req))
     }
 }

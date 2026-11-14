@@ -1,9 +1,10 @@
-use metrics::counter;
-use vector_lib::internal_event::InternalEvent;
-use vector_lib::internal_event::{error_stage, error_type};
+use vector_lib::{
+    NamedInternalEvent, counter,
+    internal_event::{CounterName, InternalEvent, error_stage, error_type},
+};
 
-#[derive(Debug)]
-pub struct FileDescriptorReadError<E> {
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct FileDescriptorReadError<E> {
     pub error: E,
 }
 
@@ -16,13 +17,13 @@ where
             message = "Error reading from file descriptor.",
             error = %self.error,
             error_type = error_type::CONNECTION_FAILED,
-            stage = error_stage::RECEIVING,
-            internal_log_rate_limit = true
+            stage = error_stage::RECEIVING
         );
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_type" => error_type::CONNECTION_FAILED,
             "stage" => error_stage::RECEIVING,
-        );
+        )
+        .increment(1);
     }
 }

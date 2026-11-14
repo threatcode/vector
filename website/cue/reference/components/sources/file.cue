@@ -6,8 +6,7 @@ components: sources: file: {
 	title: "File"
 
 	classes: {
-		commonly_used: true
-		delivery:      "best_effort"
+		delivery: "best_effort"
 		deployment_roles: ["daemon", "sidecar"]
 		development:   "stable"
 		egress_method: "stream"
@@ -41,14 +40,13 @@ components: sources: file: {
 				""",
 		]
 		warnings: []
-		notices: []
 	}
 
 	installation: {
 		platform_name: null
 	}
 
-	configuration: base.components.sources.file.configuration & {
+	configuration: generated.components.sources.file.configuration & {
 		remove_after_secs: warnings: [
 			"""
 				Vector’s process must have permission to delete files.
@@ -219,7 +217,8 @@ components: sources: file: {
 				check](\(urls.crc)) (CRC) on the first N lines of the file. This serves as a
 				*fingerprint* that uniquely identifies the file. The number of lines, N, that are
 				read can be set using the [`fingerprint.lines`](#fingerprint.lines) and
-				[`fingerprint.ignored_header_bytes`](#fingerprint.ignored_header_bytes) options.
+				[`fingerprint.ignored_header_bytes`](#fingerprint.ignored_header_bytes) options. Note
+				that for compressed files, these lines and header bytes refer to the uncompressed content.
 
 				This strategy avoids the common pitfalls associated with using device and inode
 				names since inode names can be reused across files. This enables Vector to properly
@@ -233,6 +232,12 @@ components: sources: file: {
 				[Globbing](\(urls.globbing)) is supported in all provided file paths,
 				files will be autodiscovered continually at a rate defined by the
 				`glob_minimum_cooldown` option.
+
+				Vector uses the Rust [`glob` crate](\(urls.glob_crate)) for pattern matching.
+				Basic glob functionality should work as expected, including multiple wildcards in a
+				single path (e.g., `/opt/nomad/data/alloc/*/alloc/logs/monitor.std*.*`) and
+				recursive directory matching with `**` (e.g., `/var/lib/kubelet/pods/**/logs/*.log`).
+				See the [glob crate documentation](\(urls.glob_crate_pattern)) for complete syntax details.
 				"""
 		}
 
@@ -423,11 +428,14 @@ components: sources: file: {
 	}
 
 	telemetry: metrics: {
-		checkpoints_total:     components.sources.internal_metrics.output.metrics.checkpoints_total
-		checksum_errors_total: components.sources.internal_metrics.output.metrics.checksum_errors_total
-		files_added_total:     components.sources.internal_metrics.output.metrics.files_added_total
-		files_deleted_total:   components.sources.internal_metrics.output.metrics.files_deleted_total
-		files_resumed_total:   components.sources.internal_metrics.output.metrics.files_resumed_total
-		files_unwatched_total: components.sources.internal_metrics.output.metrics.files_unwatched_total
+		checkpoints_total:                        components.sources.internal_metrics.output.metrics.checkpoints_total
+		checksum_errors_total:                    components.sources.internal_metrics.output.metrics.checksum_errors_total
+		files_added_total:                        components.sources.internal_metrics.output.metrics.files_added_total
+		files_deleted_total:                      components.sources.internal_metrics.output.metrics.files_deleted_total
+		files_resumed_total:                      components.sources.internal_metrics.output.metrics.files_resumed_total
+		files_unwatched_bytes_unread_total:       components.sources.internal_metrics.output.metrics.files_unwatched_bytes_unread_total
+		files_unwatched_total:                    components.sources.internal_metrics.output.metrics.files_unwatched_total
+		files_unwatched_with_unknown_bytes_total: components.sources.internal_metrics.output.metrics.files_unwatched_with_unknown_bytes_total
+		open_files:                               components.sources.internal_metrics.output.metrics.open_files
 	}
 }

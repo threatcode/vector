@@ -1,9 +1,11 @@
-use metrics::counter;
-use vector_lib::internal_event::InternalEvent;
-use vector_lib::internal_event::{error_stage, error_type, ComponentEventsDropped, UNINTENTIONAL};
+use vector_lib::internal_event::{
+    ComponentEventsDropped, CounterName, InternalEvent, UNINTENTIONAL, emit, error_stage,
+    error_type,
+};
+use vector_lib::{NamedInternalEvent, counter};
 
-#[derive(Debug)]
-pub struct DatadogTracesEncodingError {
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct DatadogTracesEncodingError {
     pub error_message: &'static str,
     pub error_reason: String,
     pub dropped_events: usize,
@@ -18,16 +20,16 @@ impl InternalEvent for DatadogTracesEncodingError {
             error_reason = %self.error_reason,
             error_type = error_type::ENCODER_FAILED,
             stage = error_stage::PROCESSING,
-            internal_log_rate_limit = true,
         );
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_type" => error_type::ENCODER_FAILED,
             "stage" => error_stage::PROCESSING,
-        );
+        )
+        .increment(1);
 
         if self.dropped_events > 0 {
-            emit!(ComponentEventsDropped::<UNINTENTIONAL> {
+            emit(ComponentEventsDropped::<UNINTENTIONAL> {
                 count: self.dropped_events,
                 reason,
             });
@@ -35,8 +37,8 @@ impl InternalEvent for DatadogTracesEncodingError {
     }
 }
 
-#[derive(Debug)]
-pub struct DatadogTracesAPMStatsError<E> {
+#[derive(Debug, NamedInternalEvent)]
+pub(crate) struct DatadogTracesAPMStatsError<E> {
     pub error: E,
 }
 
@@ -47,13 +49,13 @@ impl<E: std::fmt::Display> InternalEvent for DatadogTracesAPMStatsError<E> {
             error = %self.error,
             error_type = error_type::WRITER_FAILED,
             stage = error_stage::SENDING,
-            internal_log_rate_limit = true,
         );
         counter!(
-            "component_errors_total", 1,
+            CounterName::ComponentErrorsTotal,
             "error_type" => error_type::WRITER_FAILED,
             "stage" => error_stage::SENDING,
-        );
+        )
+        .increment(1);
 
         // No dropped events because APM stats payloads are not considered events.
     }
